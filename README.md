@@ -1,7 +1,7 @@
 
-# HCC-Adapter: Hartley–Cosine Adapters 
+# 1D-DT-Adapter: 1D-DT-Adapte Adapters 
 
-Parameter-efficient finetuning (PEFT) for convolutional backbones with a lightweight **Hartley–Cosine Adapter (HCC)**. This work builds on the idea of Conv-Adapter and adds an HCC module, robust training/runtime fixes, and a simpler backbone loader that supports **torchvision** and common **CIFAR TorchHub** backbones.
+Parameter-efficient finetuning (PEFT) for convolutional backbones with a lightweight **H1D-DT-Adapte (HCC)**. This work builds on the idea of Conv-Adapter and adds an HCC module, robust training/runtime fixes, and a simpler backbone loader that supports **torchvision** and common **CIFAR TorchHub** backbones.
 
 > If you use this code, **please cite Conv-Adapter and this repository.**
 
