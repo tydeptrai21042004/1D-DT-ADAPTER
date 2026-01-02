@@ -1,15 +1,54 @@
 
-# 1D-DT-Adapter: 1D-DT-Adapte Adapters 
+# 1D-DT-Adapter (1D Dilated-Tap Adapter)
 
-Parameter-efficient finetuning (PEFT) for convolutional backbones with a lightweight **H1D-DT-Adapte (HCC)**. This work builds on the idea of Conv-Adapter and adds an HCC module, robust training/runtime fixes, and a simpler backbone loader that supports **torchvision** and common **CIFAR TorchHub** backbones.
+Parameter-efficient fine-tuning (PEFT) for convolutional backbones using a lightweight **1D-DT Adapter** module (a.k.a. **HCC-style** adapter).
+This repo builds on the **Conv-Adapter** idea and adds:
 
-> If you use this code, **please cite Conv-Adapter and this repository.**
+* A **1D dilated-tap, even-symmetric** spatial adapter (low distortion / linear-phase behavior),
+* Robust training/runtime guards (CPU fallback, AMP auto-disable on CPU, safe CUDA sync),
+* A simpler backbone loader supporting **torchvision** and common **CIFAR TorchHub** backbones.
+
+> If you use this code, please cite **Conv-Adapter** and **this repository**.
 
 ---
 
-## What is HCC-Adapter?
+## Method (short analysis)
 
-**HCC (Hartley–Cosine Adapter)** aggregates **even** spatial shifts of a feature map (symmetric `roll`s) and reprojects them with a tiny bottleneck. Because the aggregation is even-symmetric, its frequency response is cosine-only (zero/linear phase), which makes it a **low-distortion** adapter for CNN features. You can drop it into common ConvNet blocks and enable it via `--tuning_method hcc`.
+### What the 1D-DT Adapter does
+
+Given a feature map `x ∈ R^{B×C×H×W}`, the adapter builds a small residual update:
+
+1. **Depthwise 1D “dilated taps” along height and/or width**
+   It applies a **per-channel** 1D convolution with kernel length `K = 2M+1` and dilation `h`, either:
+
+* vertical (`axis='h'`), horizontal (`axis='w'`), or both (`axis='hw'`).
+
+2. **Even symmetry (cosine-only response / linear phase)**
+   The taps are symmetric around the center (same coefficient for `+m` and `−m`).
+   This makes the spatial operator “low-distortion” in the sense that it avoids odd/phase-skew components (intuitively: it behaves like a smooth cosine response rather than a phase-warping filter).
+
+3. **Group-shared coefficients (parameter-efficient)**
+   Instead of learning a separate tap vector per channel, channels are partitioned into groups and **share** the same tap coefficients within each group.
+   So α parameters scale like:
+
+* `#α ≈ (C / alpha_group) × (M+1)` (center + M side taps)
+
+4. **Optional tiny channel mixing (1×1 bottleneck, grouped)**
+   After spatial aggregation, an optional **grouped 1×1 bottleneck** mixes channels:
+   `C → (C/pw_ratio) → C` (with optional BN + ReLU).
+
+5. **Residual gate for safe initialization**
+   Output is:
+   `out = x + adapt_scale * gate * adapter(x)`
+   with small `gate_init` (e.g., 0.0 or 0.1), so training starts close to identity and remains stable.
+
+**Why it’s PEFT-friendly:** you freeze the backbone and train only these small adapter parameters.
+
+---
+
+## What is “1D-DT” here?
+
+**1D-DT = 1D Dilated-Tap**: a separable, depthwise 1D filter (with dilation) applied along H/W directions to add cheap spatial context.
 
 ---
 
@@ -17,35 +56,39 @@ Parameter-efficient finetuning (PEFT) for convolutional backbones with a lightwe
 
 ### New
 
-* **HCC Adapter path**: `--tuning_method hcc` with HCC-specific flags:
+* **1D-DT Adapter tuning method** (`--tuning_method dt` or `hcc`, depending on your CLI naming)
 
-  * `--hcc_h`, `--hcc_M`, `--hcc_axis`, `--hcc_per_channel`, `--hcc_use_center`
-  * `--hcc_pw_ratio`, `--hcc_gate_init`, `--hcc_padding` (`circular|reflect|replicate|zeros`)
-  * Global residual scale: `--adapt_scale`
+* 1D-DT flags (typical):
+
+  * `--dt_h`, `--dt_M`, `--dt_axis`
+  * `--dt_per_channel` (legacy) / `--dt_alpha_group` (new)
+  * `--dt_pw_ratio`, `--dt_pw_groups`, `--dt_no_pw`
+  * `--dt_gate_init`, `--dt_padding` (`reflect|replicate|zeros`)
+
+* Global adapter residual scale:
+
+  * `--adapt_scale`
 
 ### Training/runtime quality-of-life
 
-* **CPU fallback** and **AMP auto-disable on CPU** (no surprise crashes).
-* **CUDA-guarded** synchronizations to avoid “no NVIDIA driver” issues.
-* **BatchNorm truly frozen** (set to `eval()` and affine grads disabled) when the backbone is frozen.
-* **Modern backbone weights** via `torchvision`’s multi-weight API (e.g., `ResNet50_Weights.IMAGENET1K_V2`) for strong baselines.
+* CPU fallback + AMP auto-disable on CPU
+* CUDA-guarded synchronizations (avoid “no NVIDIA driver” crashes)
+* BatchNorm properly frozen when backbone is frozen (eval mode + affine grads off)
+* Modern torchvision weights (multi-weight API, e.g., `ResNet50_Weights.IMAGENET1K_V2`)
 
-
+---
 
 ## Installation
 
 ```bash
-# core
 pip install torch torchvision timm
-
-
 ```
 
-
+---
 
 ## Data layout
 
-Put datasets under `./data/<name>`, e.g.:
+Place datasets under `./data/<name>`:
 
 ```
 ./data/cifar10
@@ -58,71 +101,85 @@ Put datasets under `./data/<name>`, e.g.:
 
 ## Backbones
 
-We support:
+Supported backbones:
 
-* **torchvision** models via `--backbone` + `--weights` (e.g., `resnet50` with `ResNet50_Weights.IMAGENET1K_V2`).
-* **CIFAR TorchHub** models via `--backbone cifar10_resnet56` (or `cifar100_resnet56`) and `--cifar_hub chenyaofo` (or `akamaster`).
+* **torchvision** models via `--backbone` + `--weights`
 
-List available torchvision model names:
+  * Example: `resnet50` with `ResNet50_Weights.IMAGENET1K_V2`
+* **CIFAR TorchHub** models via `--backbone cifar10_resnet56` (or `cifar100_resnet56`)
+
+  * with `--cifar_hub chenyaofo` (or `akamaster`)
+
+List torchvision model names:
 
 ```bash
 python main.py --list_backbones
 ```
 
-> When using CIFAR TorchHub backbones, the script **auto-sets `--input_size 32`**.
+> For CIFAR TorchHub backbones, the script auto-sets `--input_size 32`.
 
 ---
 
 ## Quick start (CIFAR-10 / CIFAR-100)
 
-> Tip: Add `--dist_eval False` for single-GPU; for CPU use `--device cpu` (AMP auto-disables).
+> Tip: For single GPU, add `--dist_eval False`.
+> For CPU: `--device cpu` (AMP auto-disables).
 
-
-
-**CIFAR-10 + ResNet-56 (TorchHub, chenyaofo):**
+### CIFAR-10 + ResNet-56 (TorchHub)
 
 ```bash
 python main.py \
   --dataset cifar10 --data_path ./data/cifar10 --nb_classes 10 \
   --backbone cifar10_resnet56 --cifar_hub chenyaofo \
-  --tuning_method hcc \
-  --hcc_h 1 --hcc_M 2 --hcc_axis hw --hcc_per_channel True \
-  --hcc_use_center True --hcc_pw_ratio 8 --hcc_gate_init 0.0 \
-  --hcc_padding circular --adapt_scale 1.0 \
+  --tuning_method dt \
+  --dt_h 1 --dt_M 2 --dt_axis hw \
+  --dt_per_channel True \
+  --dt_pw_ratio 8 --dt_gate_init 0.0 \
+  --dt_padding reflect --adapt_scale 1.0 \
   --batch_size 128 --epochs 200 --lr 1e-3 \
   --use_amp True --dist_eval False
 ```
 
+**Notes**
+
+* `dt_per_channel True` usually means “each channel gets its own α” (legacy).
+* In the newer adapter API, this is equivalent to setting `alpha_group=1`.
+
+---
 
 ## Torchvision (ImageNet) backbone example
 
-If you prefer `resnet50` with ImageNet weights:
+Example with `resnet50` + ImageNet weights:
 
 ```bash
 python main.py \
   --dataset cifar100 --data_path ./data/cifar100 --nb_classes 100 \
   --backbone resnet50 --weights ResNet50_Weights.IMAGENET1K_V2 \
-  --tuning_method hcc \
+  --tuning_method dt \
   --input_size 224 --imagenet_default_mean_and_std True \
   --batch_size 64 --epochs 50 --lr 1e-4
 ```
 
+---
 
 ## Tips & gotchas
 
-* **Backbone freezing**: when using adapters (`--tuning_method conv|hcc|residual`), the script freezes all backbone params and BN affine terms; only adapter params train.
-* **Input size**: CIFAR models use `32×32`; torchvision ImageNet models often expect `224×224` with ImageNet mean/std normalization.
-* **EMA**: Optional via `--model_ema`; you can also eval EMA weights during training with `--model_ema_eval`.
+* **Backbone freezing**: when using adapters (`--tuning_method conv|dt|residual`), the script freezes backbone params and BN affine terms; only adapter params train.
+* **Input size**:
+
+  * CIFAR backbones: `32×32`
+  * ImageNet backbones: typically `224×224` + ImageNet mean/std
+* **EMA**: optional via `--model_ema`; can eval EMA weights during training with `--model_ema_eval`.
 
 ---
 
 ## Repository structure
 
 ```
-Conv-Adapter/
-├── main.py                # Entry point (CLI, backbones, adapters, device/AMP guards)
-├── engine.py              # Train/eval loops (CUDA-guarded syncs)
-├── models/                # Backbones + adapters (HCC + Conv/Residual variants)
+1D-DT-Adapter/
+├── main.py                # CLI, backbones, adapters, device/AMP guards
+├── engine.py              # Train/eval loops (safe CUDA sync)
+├── models/                # Backbones + adapters (1D-DT / Conv / Residual)
 ├── datasets/              # Dataset builders + transforms
 ├── utils.py               # Logging, EMA, schedulers, etc.
 └── ...
@@ -130,50 +187,36 @@ Conv-Adapter/
 
 ---
 
-## Why HCC?
+## Why 1D-DT Adapter?
 
-* **Zero/linear-phase** behavior from even-shift aggregation → less phase distortion when adapting features.
-* **Tiny parameter footprint**; optional channel-wise operation (`--hcc_per_channel`).
-* **Drop-in**: choose `--tuning_method hcc` vs `conv`/`residual` with the same training loop.
+* **Low distortion**: even-symmetric spatial aggregation behaves like a cosine-only response (linear phase intuition).
+* **Tiny parameter footprint**: group-shared taps reduce α parameters significantly.
+* **Drop-in**: works like Conv-Adapter—same training loop, just switch `--tuning_method dt`.
 
 ---
 
 ## Citation
 
-Please cite Conv-Adapter and this repository.
+Please cite:
 
-**Conv-Adapter (original idea):**
-Chen et al., *Conv-Adapter: Exploring Parameter Efficient Transfer Learning for ConvNets*, arXiv:2208.07463 (frequently updated; CVPR 2024 Workshop). ([arXiv][2])
+* **Conv-Adapter**: arXiv:2208.07463 (also appeared in a CVPR 2024 Workshop context)
+* **This repository**: 1D-DT-Adapter (codebase)
 
-**CLIP (background for RN50 / RN50×4):**
-Radford et al., *Learning Transferable Visual Models From Natural Language Supervision*, 2021.
-
-**Torchvision weights (multi-weight API example for ResNet-50):**
-PyTorch `ResNet50_Weights` docs.
+(If you want, tell me your preferred citation format: BibTeX, IEEE, or ACM, and I’ll generate the exact entries.)
 
 ---
 
 ## Acknowledgements & Credits
 
 * Built on the ideas of **Conv-Adapter** (thanks to the original authors).
-* Pretrained backbones provided by **torchvision**; CLIP baselines via **OpenCLIP** / **OpenAI CLIP**.
+* Pretrained backbones via **torchvision**; CLIP baselines (if used) via OpenCLIP / OpenAI CLIP.
 
 ---
 
-### Maintainers
+## Maintainers
 
 * Tran Kim Huong
 * Dang Ba Ty
 
-If you want small usability tweaks (extra datasets, plots), open an issue or PR.
 
----
-
-**Notes on sources:**
-Conv-Adapter (paper/idea) and CLIP RN50/RN50×4 availability are documented in their respective papers; torchvision’s multi-weight API is documented in the official PyTorch docs. ([arXiv][2])
-
-If you’d like me to tailor the README further (e.g., add **Flowers102/Pets** commands, or a ready-to-run **OpenCLIP linear-probe** script inside your repo), say the word and I’ll drop them in.
-
-[1]: https://arxiv.org/html/2505.18842v3?utm_source=chatgpt.com "Learning to Point Visual Tokens for Multimodal Grounded ..."
-[2]: https://arxiv.org/abs/2208.07463?utm_source=chatgpt.com "[2208.07463] Conv-Adapter: Exploring Parameter Efficient ..."
 
