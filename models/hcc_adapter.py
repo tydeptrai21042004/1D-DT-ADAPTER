@@ -1,10 +1,10 @@
-# models/hcc_adapter.py
+# models/dt1d_adapter.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import gcd
 
-class HCCAdapter(nn.Module):
+class DT1DAdapter(nn.Module):
     def __init__(
         self, C, M=1, h=1, axis='hw',
         alpha_group=16,             # NEW API (group-shared alphas)
@@ -35,12 +35,11 @@ class HCCAdapter(nn.Module):
         if 'use_pw' in legacy:
             use_pw_legacy = bool(legacy.pop('use_pw'))
             no_pw = (not use_pw_legacy)
-        # ignore any other legacy keys silently (or log if you prefer)
+        # ignore any other legacy keys silently
 
         self.alpha_group = max(1, int(alpha_group))
         self.no_pw = bool(no_pw)
         self.use_bn = bool(use_bn)
-
 
         # ---------- α coefficients (group-shared) ----------
         self.alpha_group = max(1, int(alpha_group))
@@ -120,4 +119,8 @@ class HCCAdapter(nn.Module):
         y = self.pw(y)
         return x + self.residual_scale * self.gate * y
 
-# convenience alias for your previous import path
+
+# Backward-compatible aliases (keep old import paths working)
+HCCAdapter = DT1DAdapter
+H1D_DT_Adapter = DT1DAdapter
+OneDDTAdapter = DT1DAdapter
