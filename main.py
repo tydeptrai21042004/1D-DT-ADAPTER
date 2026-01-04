@@ -470,7 +470,7 @@ def main(args):
         )
     else:
         # Branch B: General PET shim (torchvision + CIFAR torch.hub backbones)
-        if args.tuning_method in ('conv', 'adapter', 'hcc', 'residual'):
+        if args.tuning_method in ('conv', 'adapter', 'hcc', 'residual', 'ssf', 'lora_conv', 'bitfit', 'sidetune'):
             import torchvision
 
             # Heuristic: whether we want pretrained for TorchHub
@@ -539,6 +539,7 @@ def main(args):
                                 m.bias.requires_grad = False
 
             # --- Define Adapters ---
+            enable_bitfit = False
             do_hook_attach = True  # <-- key: only use hook path when we actually defined make_adapter
 
             if args.tuning_method in ('conv', 'adapter'):
