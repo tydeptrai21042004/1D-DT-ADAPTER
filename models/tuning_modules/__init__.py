@@ -4,6 +4,11 @@ from .prompter import PadPrompter
 from .conv_adapter import ConvAdapter, LinearAdapter
 from .program_module import ProgramModule
 
+# NEW baselines
+from .ssf import SSF
+from .lora_conv import LoRAConv2d, apply_lora_conv2d
+
+
 def set_tuning_config(tuning_method, args):
     """
     Return a small config dict describing the chosen tuning method.
@@ -12,27 +17,35 @@ def set_tuning_config(tuning_method, args):
     Supported families:
       conv_adapt | conv_adapt_norm | conv_adapt_bias | conv | conv-adapter | conv_adapter
       prompt
-      full | linear | norm | repnet | repnet_bias | bias
+      full | linear | norm | repnet | repnet_bias | bias | bitfit
       hcc | hcc_adapter
       residual | residual_adapter | residual_adapters | ra
       sidetune | side-tuning | sidetuning | side_tune
+      ssf
+      lora_conv | lora-conv | lora
     """
-    # ---- Normalize aliases ----------------------------------------------------
     alias = {
+        # conv-adapter family
         "conv": "conv_adapt",
         "conv-adapter": "conv_adapt",
         "conv_adapter": "conv_adapt",
 
+        # HCC
         "hcc_adapter": "hcc",
 
+        # residual adapter aliases
         "residual_adapter": "residual",
         "residual_adapters": "residual",
         "ra": "residual",
 
-        # new: side-tuning aliases
+        # side-tuning aliases
         "side-tuning": "sidetune",
         "sidetuning": "sidetune",
         "side_tune": "sidetune",
+
+        # NEW: LoRA aliases
+        "lora": "lora_conv",
+        "lora-conv": "lora_conv",
     }
     tm = alias.get(str(tuning_method), str(tuning_method))
 
@@ -47,13 +60,10 @@ def set_tuning_config(tuning_method, args):
 
     # ---- Prompt ---------------------------------------------------------------
     if tm == "prompt":
-        return {
-            "method": tm,
-            "prompt_size": getattr(args, "prompt_size", 10),
-        }
+        return {"method": tm, "prompt_size": getattr(args, "prompt_size", 10)}
 
     # ---- Simple switches ------------------------------------------------------
-    if tm in ("full", "linear", "norm", "repnet", "repnet_bias", "bias"):
+    if tm in ("full", "linear", "norm", "repnet", "repnet_bias", "bias", "bitfit"):
         return {"method": tm}
 
     # ---- Hartley–Cosine Adapter (HCC) ----------------------------------------
@@ -67,7 +77,6 @@ def set_tuning_config(tuning_method, args):
             "tie_sym":        getattr(args, "hcc_tie_sym", True),
             "use_pw":         getattr(args, "hcc_use_pw", True),
             "pw_ratio":       getattr(args, "hcc_pw_ratio", 8),
-            # optional flags in your repo; ignored by HCCAdapter if unused
             "residual_scale": getattr(args, "hcc_residual_scale", 1.0),
             "gate_init":      getattr(args, "hcc_gate_init", 0.1),
             "padding_mode":   getattr(args, "hcc_padding", "reflect"),
@@ -85,7 +94,7 @@ def set_tuning_config(tuning_method, args):
             "stages":      getattr(args, "ra_stages", "1,2,3,4"),
         }
 
-    # ---- Side-Tuning (wrapper does the work; config kept minimal) -------------
+    # ---- Side-Tuning ----------------------------------------------------------
     if tm == "sidetune":
         return {
             "method": "sidetune",
@@ -95,5 +104,20 @@ def set_tuning_config(tuning_method, args):
             "side_depth": getattr(args, "sidetune_depth", 3),
         }
 
-    # ---- Unknown --------------------------------------------------------------
+    # ---- NEW: SSF -------------------------------------------------------------
+    if tm == "ssf":
+        return {
+            "method": "ssf",
+            "init_scale": getattr(args, "ssf_init_scale", 1.0),
+            "init_shift": getattr(args, "ssf_init_shift", 0.0),
+        }
+
+    # ---- NEW: LoRA Conv -------------------------------------------------------
+    if tm == "lora_conv":
+        return {
+            "method": "lora_conv",
+            "r": getattr(args, "lora_r", 4),
+            "alpha": getattr(args, "lora_alpha", 1.0),
+        }
+
     raise NotImplementedError(f"Unknown tuning_method: {tuning_method}")
