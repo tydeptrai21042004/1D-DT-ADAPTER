@@ -71,10 +71,9 @@ def get_args_parser():
     parser.add_argument('--freeze_backbone', type=str2bool, default=True,
                         help='Freeze backbone (incl. CLIP visual) and train only adapters / head.')
 
-    # -------------------- Tuning method --------------------
-# -------------------- Tuning method --------------------
     parser.add_argument('--tuning_method', type=str, default='prompt',
-                        help='prompt | conv | adapter | hcc | residual | sidetune')
+                        help='prompt | conv | adapter | hcc | residual | ssf | lora_conv | bitfit | sidetune')
+
 
     # Side-tuning hyperparams
     parser.add_argument('--sidetune_alpha', type=float, default=0.5)
@@ -860,7 +859,14 @@ def main(args):
     for n, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-        if 'pet_adapter' in n or 'hcc' in n or id(p) in adapter_param_ids:
+        is_adapter_like = (
+            ('pet_adapter' in n) or
+            ('hcc' in n) or
+            ('ssf' in n) or
+            ('lora' in n) or
+            (id(p) in adapter_param_ids)
+        )
+        if is_adapter_like:
             hcc_params.append(p)
         else:
             other_params.append(p)
