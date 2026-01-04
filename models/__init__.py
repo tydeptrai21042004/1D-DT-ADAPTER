@@ -8,7 +8,6 @@ from .heads import *               # LinearHead
 from .tuning_modules import set_tuning_config
 from .layers.ws_conv import WSConv2d
 
-# Side-tuning wrapper
 from .tuning_modules.side_tuning import SideTuningClassifier
 
 __all__ = ['build_model']
@@ -36,6 +35,28 @@ def replace_conv2d_with_my_conv2d(net, ws_eps=None):
             m.ws_eps = ws_eps
 
 
+def _normalize_tuning_method(tuning_method: str) -> str:
+    alias = {
+        "conv": "conv_adapt",
+        "conv-adapter": "conv_adapt",
+        "conv_adapter": "conv_adapt",
+
+        "hcc_adapter": "hcc",
+
+        "residual_adapter": "residual",
+        "residual_adapters": "residual",
+        "ra": "residual",
+
+        "side-tuning": "sidetune",
+        "sidetuning": "sidetune",
+        "side_tune": "sidetune",
+
+        "lora": "lora_conv",
+        "lora-conv": "lora_conv",
+    }
+    return alias.get(str(tuning_method), str(tuning_method))
+
+
 def _safe_tuning_config(tuning_method, args):
     """
     Some repos don't define a config for 'sidetune'; in that case,
@@ -44,8 +65,8 @@ def _safe_tuning_config(tuning_method, args):
     try:
         return set_tuning_config(tuning_method, args)
     except NotImplementedError:
-        if str(tuning_method) == 'sidetune':
-            return {"method": "full"}  # base acts like vanilla backbone
+        if str(_normalize_tuning_method(tuning_method)) == 'sidetune':
+            return {"method": "full"}
         raise
 
 
@@ -55,8 +76,10 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
     Build a backbone and apply the requested parameter-efficient tuning method.
     'sidetune' wraps a frozen backbone with a lightweight side network + alpha blending.
     """
+    tm = _normalize_tuning_method(tuning_method)
+
     # 1) Build the base backbone
-    tuning_config = _safe_tuning_config(tuning_method, args)
+    tuning_config = _safe_tuning_config(tm, args)
     base = eval(model_name)(
         pretrained=pretrained,
         tuning_config=tuning_config,
@@ -65,49 +88,65 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
     )
 
     # 2) Wrap (sidetune) or attach standard head
-    if str(tuning_method) == 'sidetune':
-        model = SideTuningClassifier(
-            base_model=base,                                      # ✅ correct kw
+    if str(tm) == 'sidetune':
+        # Be robust to wrapper signature differences
+        kw = dict(
             num_classes=num_classes,
             side_width=int(getattr(args, 'sidetune_width', 64)),
             side_depth=int(getattr(args, 'sidetune_depth', 3)),
             learn_alpha=bool(getattr(args, 'sidetune_learn_alpha', True)),
             alpha_init=float(getattr(args, 'sidetune_alpha', 0.5)),
-            use_checkpoint=True,                                  # saves VRAM (see docs)
+            use_checkpoint=True,
         )
+        try:
+            model = SideTuningClassifier(base_backbone=base, **kw)
+        except TypeError:
+            model = SideTuningClassifier(base_model=base, **kw)
     else:
         model = base
         model.head = LinearHead(model.num_features, num_classes, drop=0.2)
 
+    # 2.5) Apply LoRA replacement (builder-path support)
+    if tm == 'lora_conv':
+        from .tuning_modules.lora_conv import apply_lora_conv2d
+        r = int(getattr(args, 'lora_r', 4))
+        alpha = float(getattr(args, 'lora_alpha', 1.0))
+        apply_lora_conv2d(model, r=r, alpha=alpha)
+
     # 3) Freeze/unfreeze according to tuning method
-    if tuning_method == 'full':
+    if tm == 'full':
         pass
-    elif tuning_method == 'prompt':
+
+    elif tm == 'prompt':
         for name, p in model.named_parameters():
-            if name.startswith('head'):         # train head
+            if name.startswith('head'):
                 continue
-            if name.startswith('norm'):         # keep norms trainable
+            if name.startswith('norm'):
                 continue
-            if 'tuning_module' in name:         # prompt modules
+            if 'tuning_module' in name:
                 continue
             p.requires_grad = False
-    elif tuning_method == 'adapter':
+
+    elif tm == 'adapter':
         raise NotImplementedError
-    elif tuning_method == 'sidetune':
+
+    elif tm == 'sidetune':
         # Train only side network + alpha + head; freeze the base
         for name, p in model.named_parameters():
             train_ok = (
-                name.startswith('side_net.') or                   # ✅ correct prefix
+                name.startswith('side_net.') or
                 name.startswith('head.') or
                 name == 'alpha_logit'
             )
             p.requires_grad = train_ok
-    elif tuning_method == 'linear':
+
+    elif tm == 'linear':
         for name, p in model.named_parameters():
             if name.startswith('head') or name.startswith('norm'):
                 continue
             p.requires_grad = False
-    elif tuning_method == 'norm':
+
+    elif tm == 'norm':
         for name, p in model.named_parameters():
             if name.startswith('head'):
                 continue
@@ -116,12 +155,24 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
             if 'before_head' in name:
                 continue
             p.requires_grad = False
-    elif tuning_method == 'bias':
+
+    elif tm == 'bias':
+        # (existing behavior): head + norms + all biases
         for name, p in model.named_parameters():
             if name.startswith('head') or name.startswith('norm') or ('bias' in name):
                 continue
             p.requires_grad = False
-    elif tuning_method in ('conv_adapt', 'repnet'):
+
+    elif tm == 'bitfit':
+        # strict BitFit: head + biases only (no norms)
+        for name, p in model.named_parameters():
+            if name.startswith('head'):
+                continue
+            if name.endswith('.bias') or ('.bias' in name):
+                continue
+            p.requires_grad = False
+
+    elif tm in ('conv_adapt', 'repnet'):
         for name, p in model.named_parameters():
             if name.startswith('head'):
                 continue
@@ -130,7 +181,8 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
             if 'norm' in name:
                 continue
             p.requires_grad = False
-    elif tuning_method == 'conv_adapt_norm':
+
+    elif tm == 'conv_adapt_norm':
         for name, p in model.named_parameters():
             if name.startswith('head'):
                 continue
@@ -141,7 +193,8 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
             if 'before_head' in name:
                 continue
             p.requires_grad = False
-    elif tuning_method in ('conv_adapt_bias', 'repnet_bias'):
+
+    elif tm in ('conv_adapt_bias', 'repnet_bias'):
         for name, p in model.named_parameters():
             if name.startswith('head'):
                 continue
@@ -153,10 +206,34 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
                 continue
             p.requires_grad = False
 
-    if 'repnet' in str(tuning_method):
+    elif tm == 'ssf':
+        # Train head + SSF params (and optionally norms, keep consistent with conv_adapt)
+        for name, p in model.named_parameters():
+            if name.startswith('head'):
+                continue
+            if 'ssf' in name:
+                continue
+            if 'tuning_module' in name:
+                continue
+            if 'norm' in name:
+                continue
+            p.requires_grad = False
+
+    elif tm == 'lora_conv':
+        # Train head + LoRA params (and optionally norms, keep consistent with conv_adapt)
+        for name, p in model.named_parameters():
+            if name.startswith('head'):
+                continue
+            if 'lora_' in name or 'lora_down' in name or 'lora_up' in name or 'LoRA' in name:
+                continue
+            if 'norm' in name:
+                continue
+            p.requires_grad = False
+
+    if 'repnet' in str(tm):
         replace_conv2d_with_my_conv2d(model, 1e-5)
 
-    # 4) Debug: list trainable params (optional)
+    # 4) Debug: list trainable params
     for n, p in model.named_parameters():
         if p.requires_grad:
             print(f"{n} is trainable")
