@@ -104,7 +104,7 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
             model = SideTuningClassifier(base_model=base, **kw)
     else:
         model = base
-        model.head = LinearHead(model.num_features, num_classes, drop=0.2)
+        model.head = LinearHead(model.num_features, num_classes)
 
     # 2.5) Apply LoRA replacement (builder-path support)
     if tm == 'lora_conv':
