@@ -580,7 +580,8 @@ def main(args):
                     from models.tuning_modules.lora_conv import apply_lora_conv2d
                 except Exception as e:
                     raise RuntimeError(f"Cannot import apply_lora_conv2d from models/tuning_modules/lora_conv.py: {e}")
-                apply_lora_conv2d(model_backbone, r=args.lora_r, alpha=args.lora_alpha, target=args.lora_target)
+                apply_lora_conv2d(model_backbone, r=args.lora_r, alpha=args.lora_alpha)
+
 
             elif args.tuning_method == 'bitfit':
                 do_hook_attach = False
@@ -1044,3 +1045,4 @@ if __name__ == '__main__':
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     args.data = Path(args.data_path).name
     main(args)
+
