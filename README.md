@@ -242,7 +242,7 @@ If you use this repository, please cite the associated manuscript:
 
 ### Paper (February 2026)
 
-**A Lightweight Adapter for Efficient Fine-Tuning in Computer Vision**
+**A Lightweight Adapter for Efficient Fine-Tuning in Computer Vision** ( preprint )
 DOI: **10.21203/rs.3.rs-8843187/v1**
 
 ```bibtex
