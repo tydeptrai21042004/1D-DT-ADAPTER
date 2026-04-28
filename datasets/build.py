@@ -1,6 +1,19 @@
+# datasets/build.py
+"""
+Dataset router for classification experiments.
+
+Revision fixes:
+1. Adds build_dataset_split(args, split) with explicit train/val/test semantics.
+2. Adds ImageNet normalization for pretrained backbones.
+3. Provides deterministic validation splits when torchvision has only train/test.
+4. Keeps build_dataset(args, is_train) backward-compatible.
+"""
+
+from __future__ import annotations
+
 import os
 from collections import Counter
-from typing import Tuple
+from typing import Callable, Tuple
 
 import torch
 import torchvision.transforms as T
@@ -8,186 +21,215 @@ from torchvision import datasets
 from torchvision.datasets import CocoDetection
 
 
-# ------------------------------
-# Minimal transforms: Resize -> ToTensor
-# - No normalization, flips, crops, jitters, etc.
-# - If input is grayscale (1ch), duplicate to 3ch after ToTensor for 3-ch models.
-# ------------------------------
+def _get_bool(args, name: str, default: bool) -> bool:
+    return bool(getattr(args, name, default))
+
+
 def _img_transforms(args, is_train: bool):
     size = int(getattr(args, "input_size", 224))
-    return T.Compose([
-        T.Resize((size, size), interpolation=T.InterpolationMode.BICUBIC),
+    train_aug = str(getattr(args, "train_aug", "standard")).lower()
+    use_norm = _get_bool(args, "imagenet_norm", _get_bool(args, "imagenet_default_mean_and_std", True))
+
+    interpolation = T.InterpolationMode.BICUBIC
+    tfms = []
+    if is_train and train_aug == "standard":
+        tfms.extend([
+            T.RandomResizedCrop(size, scale=(0.8, 1.0), interpolation=interpolation),
+            T.RandomHorizontalFlip(),
+        ])
+    else:
+        tfms.append(T.Resize((size, size), interpolation=interpolation))
+
+    tfms.extend([
         T.ToTensor(),
         T.Lambda(lambda x: x.expand(3, -1, -1) if x.shape[0] == 1 else x),
     ])
 
+    if use_norm:
+        tfms.append(T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)))
 
-# ------------------------------
-# CIFAR family
-# ------------------------------
-def _build_cifar10(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.CIFAR10(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 10
-
-def _build_cifar100(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.CIFAR100(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 100
+    return T.Compose(tfms)
 
 
-# ------------------------------
-# MNIST family
-# ------------------------------
-def _build_mnist(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.MNIST(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 10
-
-def _build_fashion_mnist(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.FashionMNIST(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 10
-
-def _build_emnist(args, is_train: bool):
-    # 'byclass' has 62 classes (0-9, A-Z, a-z)
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.EMNIST(root=args.data_path, split="byclass", train=is_train, download=True, transform=tmf if (tmf := tfm) else tfm)
-    return ds, 62
-
-def _build_kmnist(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.KMNIST(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 10
-
-def _build_qmnist(args, is_train: bool):
-    # QMNIST uses 'what' instead of 'split'
-    tfm = _img_transforms(args, is_train)
-    what = "train" if is_train else "test"
-    ds = datasets.QMNIST(root=args.data_path, what=what, download=True, transform=tfm)
-    return ds, 10
-
-def _build_usps(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.USPS(root=args.data_path, train=is_train, download=True, transform=tfm)
-    return ds, 10
+def _split_subset(base, split: str, val_ratio: float = 0.2, seed: int = 42):
+    """Deterministic train/val subset from a train split."""
+    if split not in ("train", "val"):
+        raise ValueError("_split_subset only supports train/val")
+    g = torch.Generator().manual_seed(int(seed))
+    idx = torch.randperm(len(base), generator=g).tolist()
+    n_val = max(1, int(round(val_ratio * len(idx))))
+    val_idx = idx[:n_val]
+    train_idx = idx[n_val:]
+    return torch.utils.data.Subset(base, train_idx if split == "train" else val_idx)
 
 
 # ------------------------------
-# Small/medium classification benchmarks
+# Dataset builders with split='train'|'val'|'test'
 # ------------------------------
-def _build_svhn(args, is_train: bool):
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.SVHN(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 10
-
-def _build_stl10(args, is_train: bool):
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.STL10(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 10
-
-def _build_food101(args, is_train: bool):
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.Food101(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 101
-
-def _build_pets(args, is_train: bool):
-    split = 'trainval' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.OxfordIIITPet(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 37
-
-def _build_flowers102(args, is_train: bool):
-    # torchvision split names: 'train' / 'val' / 'test'
-    split = 'train' if is_train else 'val'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.Flowers102(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 102
-
-def _build_cars(args, is_train: bool):
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.StanfordCars(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 196
-
-def _split_subset(base, ratio=0.8, seed=42, is_train=True):
-    g = torch.Generator().manual_seed(seed)
-    idx = torch.randperm(len(base), generator=g)
-    ntr = int(ratio * len(base))
-    return torch.utils.data.Subset(base, idx[:ntr] if is_train else idx[ntr:])
-
-def _build_caltech101(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    base = datasets.Caltech101(root=args.data_path, download=True, transform=tfm)
-    return _split_subset(base, is_train=is_train), 101
-
-def _build_eurosat(args, is_train: bool):
-    tfm = _img_transforms(args, is_train)
-    base = datasets.EuroSAT(root=args.data_path, download=True, transform=tfm)
-    return _split_subset(base, is_train=is_train), 10
-
-def _build_dtd(args, is_train: bool):
-    # DTD has Splits: 'train'|'val'|'test'. We use 'train' for train, 'val' for eval.
-    split = 'train' if is_train else 'val'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.DTD(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 47
+def _build_cifar10(args, split: str):
+    if split in ("train", "val"):
+        base = datasets.CIFAR10(root=args.data_path, train=True, download=True, transform=_img_transforms(args, split == "train"))
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+    return datasets.CIFAR10(root=args.data_path, train=False, download=True, transform=_img_transforms(args, False)), 10
 
 
-
-def _build_fgvc_aircraft(args, is_train: bool):
-    # Splits: 'train', 'val', 'trainval', 'test' — use 'trainval' for train, 'test' for eval
-    split = 'trainval' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.FGVCAircraft(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 100
-
-def _build_sun397(args, is_train: bool):
-    # SUN397: 397 scene classes; torchvision provides its own train/test split files
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.SUN397(root=args.data_path, download=True, transform=tfm, split=split)
-    return ds, 397
-
-def _build_gtsrb(args, is_train: bool):
-    # German Traffic Sign Recognition Benchmark
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.GTSRB(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 43
-
-def _build_fer2013(args, is_train: bool):
-    # Facial Expression Recognition 2013: 7 classes
-    split = 'train' if is_train else 'test'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.FER2013(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 7
-
-def _build_pcam(args, is_train: bool):
-    # PatchCamelyon: 'train' | 'val' | 'test'
-    split = 'train' if is_train else 'val'
-    tfm = _img_transforms(args, is_train)
-    ds = datasets.PCAM(root=args.data_path, split=split, download=True, transform=tfm)
-    return ds, 2
+def _build_cifar100(args, split: str):
+    if split in ("train", "val"):
+        base = datasets.CIFAR100(root=args.data_path, train=True, download=True, transform=_img_transforms(args, split == "train"))
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 100
+    return datasets.CIFAR100(root=args.data_path, train=False, download=True, transform=_img_transforms(args, False)), 100
 
 
-# ------------------------------
-# COCO (single-label classification wrapper)
-# ------------------------------
+def _build_mnist_like(cls, args, split: str, num_classes: int, **kwargs):
+    if split in ("train", "val"):
+        base = cls(root=args.data_path, train=True, download=True, transform=_img_transforms(args, split == "train"), **kwargs)
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), num_classes
+    ds = cls(root=args.data_path, train=False, download=True, transform=_img_transforms(args, False), **kwargs)
+    return ds, num_classes
+
+
+def _build_mnist(args, split: str):
+    return _build_mnist_like(datasets.MNIST, args, split, 10)
+
+
+def _build_fashion_mnist(args, split: str):
+    return _build_mnist_like(datasets.FashionMNIST, args, split, 10)
+
+
+def _build_emnist(args, split: str):
+    return _build_mnist_like(datasets.EMNIST, args, split, 62, split="byclass")
+
+
+def _build_kmnist(args, split: str):
+    return _build_mnist_like(datasets.KMNIST, args, split, 10)
+
+
+def _build_qmnist(args, split: str):
+    tfm = _img_transforms(args, split == "train")
+    if split in ("train", "val"):
+        base = datasets.QMNIST(root=args.data_path, what="train", download=True, transform=tfm)
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+    return datasets.QMNIST(root=args.data_path, what="test", download=True, transform=_img_transforms(args, False)), 10
+
+
+def _build_usps(args, split: str):
+    if split in ("train", "val"):
+        base = datasets.USPS(root=args.data_path, train=True, download=True, transform=_img_transforms(args, split == "train"))
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+    return datasets.USPS(root=args.data_path, train=False, download=True, transform=_img_transforms(args, False)), 10
+
+
+def _build_svhn(args, split: str):
+    if split in ("train", "val"):
+        base = datasets.SVHN(root=args.data_path, split="train", download=True, transform=_img_transforms(args, split == "train"))
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+    return datasets.SVHN(root=args.data_path, split="test", download=True, transform=_img_transforms(args, False)), 10
+
+
+def _build_stl10(args, split: str):
+    tv_split = "train" if split in ("train", "val") else "test"
+    base = datasets.STL10(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+    return base, 10
+
+
+def _build_food101(args, split: str):
+    tv_split = "train" if split in ("train", "val") else "test"
+    base = datasets.Food101(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 101
+    return base, 101
+
+
+def _build_pets(args, split: str):
+    tv_split = "trainval" if split in ("train", "val") else "test"
+    base = datasets.OxfordIIITPet(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 37
+    return base, 37
+
+
+def _build_flowers102(args, split: str):
+    # Official splits exist: train / val / test.
+    tv_split = {"train": "train", "val": "val", "test": "test"}[split]
+    return datasets.Flowers102(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train")), 102
+
+
+def _build_cars(args, split: str):
+    tv_split = "train" if split in ("train", "val") else "test"
+    base = datasets.StanfordCars(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 196
+    return base, 196
+
+
+def _build_caltech101(args, split: str):
+    base = datasets.Caltech101(root=args.data_path, download=True, transform=_img_transforms(args, split == "train"))
+    if split == "test":
+        # Caltech101 has no official test split in torchvision; use the held-out val partition as test-like.
+        split = "val"
+    return _split_subset(base, split, seed=getattr(args, "seed", 42)), 101
+
+
+def _build_eurosat(args, split: str):
+    base = datasets.EuroSAT(root=args.data_path, download=True, transform=_img_transforms(args, split == "train"))
+    if split == "test":
+        split = "val"
+    return _split_subset(base, split, seed=getattr(args, "seed", 42)), 10
+
+
+def _build_dtd(args, split: str):
+    # Official DTD splits exist: train / val / test.
+    return datasets.DTD(root=args.data_path, split=split, download=True, transform=_img_transforms(args, split == "train")), 47
+
+
+def _build_fgvc_aircraft(args, split: str):
+    tv_split = "trainval" if split in ("train", "val") else "test"
+    base = datasets.FGVCAircraft(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 100
+    return base, 100
+
+
+def _build_sun397(args, split: str):
+    # Some torchvision versions do not expose a split arg for SUN397.
+    base = datasets.SUN397(root=args.data_path, download=True, transform=_img_transforms(args, split == "train"))
+    if split == "test":
+        split = "val"
+    return _split_subset(base, split, seed=getattr(args, "seed", 42)), 397
+
+
+def _build_gtsrb(args, split: str):
+    tv_split = "train" if split in ("train", "val") else "test"
+    base = datasets.GTSRB(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 43
+    return base, 43
+
+
+def _build_fer2013(args, split: str):
+    tv_split = "train" if split in ("train", "val") else "test"
+    base = datasets.FER2013(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), 7
+    return base, 7
+
+
+def _build_pcam(args, split: str):
+    tv_split = {"train": "train", "val": "val", "test": "test"}[split]
+    return datasets.PCAM(root=args.data_path, split=tv_split, download=True, transform=_img_transforms(args, split == "train")), 2
+
+
 class _CocoSingleLabel(torch.utils.data.Dataset):
-    """Wrap CocoDetection and assign ONE label per image = majority category."""
+    """Wrap CocoDetection and assign one label per image: the majority category."""
+
     def __init__(self, img_root: str, ann_file: str, transform):
         self.base = CocoDetection(img_root, ann_file, transform=None, target_transform=None)
         self.transform = transform
-
         cat_ids = sorted(self.base.coco.getCatIds())
         self.catid2idx = {cid: i for i, cid in enumerate(cat_ids)}
-        self.idx2catid = cat_ids
-        self.num_classes = len(cat_ids)  # typically 80
-
+        self.num_classes = len(cat_ids)
         keep, labels = [], []
         for i, img_id in enumerate(self.base.ids):
             ann_ids = self.base.coco.getAnnIds(imgIds=[img_id], iscrowd=None)
@@ -195,11 +237,9 @@ class _CocoSingleLabel(torch.utils.data.Dataset):
                 continue
             anns = self.base.coco.loadAnns(ann_ids)
             counts = Counter(self.catid2idx[a["category_id"]] for a in anns if "category_id" in a)
-            if not counts:
-                continue
-            keep.append(i)
-            labels.append(counts.most_common(1)[0][0])
-
+            if counts:
+                keep.append(i)
+                labels.append(counts.most_common(1)[0][0])
         self.keep = keep
         self.labels = labels
 
@@ -213,81 +253,64 @@ class _CocoSingleLabel(torch.utils.data.Dataset):
             img = self.transform(img)
         return img, self.labels[idx]
 
-def _build_coco(args, is_train: bool):
-    split_dir = "train2017" if is_train else "val2017"
+
+def _build_coco(args, split: str):
+    split_dir = "train2017" if split in ("train", "val") else "val2017"
     img_root = os.path.join(args.data_path, split_dir)
     ann_file = os.path.join(args.data_path, "annotations", f"instances_{split_dir}.json")
-
     if not os.path.isdir(img_root):
         raise FileNotFoundError(f"[COCO] Missing images folder: {img_root}")
     if not os.path.isfile(ann_file):
         raise FileNotFoundError(f"[COCO] Missing annotations file: {ann_file}")
+    base = _CocoSingleLabel(img_root, ann_file, _img_transforms(args, split == "train"))
+    if split in ("train", "val"):
+        return _split_subset(base, split, seed=getattr(args, "seed", 42)), base.num_classes
+    return base, base.num_classes
 
-    tfm = _img_transforms(args, is_train)
-    ds = _CocoSingleLabel(img_root, ann_file, tfm)
-    return ds, ds.num_classes
+
+_BUILDERS = {
+    ("cifar10",): _build_cifar10,
+    ("cifar100", "cifar_100"): _build_cifar100,
+    ("mnist",): _build_mnist,
+    ("fashion_mnist", "fashionmnist"): _build_fashion_mnist,
+    ("emnist", "emnist_byclass"): _build_emnist,
+    ("kmnist",): _build_kmnist,
+    ("qmnist",): _build_qmnist,
+    ("usps",): _build_usps,
+    ("svhn",): _build_svhn,
+    ("stl10",): _build_stl10,
+    ("food101", "food_101"): _build_food101,
+    ("oxfordiiitpet", "oxford_iiit_pet", "pets", "oxford_pets"): _build_pets,
+    ("flowers102", "oxfordflowers102", "oxford_flowers102"): _build_flowers102,
+    ("stanford_cars", "stanfordcars", "cars"): _build_cars,
+    ("caltech101", "caltech_101"): _build_caltech101,
+    ("dtd", "describable_textures", "textures"): _build_dtd,
+    ("eurosat", "euro_sat"): _build_eurosat,
+    ("fgvc_aircraft", "fgvca", "aircraft"): _build_fgvc_aircraft,
+    ("sun397", "sun_397"): _build_sun397,
+    ("gtsrb", "traffic_signs", "german_traffic_signs"): _build_gtsrb,
+    ("fer2013", "fer_2013"): _build_fer2013,
+    ("pcam", "patch_camelyon"): _build_pcam,
+    ("coco", "coco2017", "mscoco", "mscoco2017"): _build_coco,
+}
 
 
-# ------------------------------
-# Router
-# ------------------------------
+def _resolve_builder(name: str) -> Callable:
+    name = (name or "").lower().replace("-", "_")
+    for aliases, fn in _BUILDERS.items():
+        if name in aliases:
+            return fn
+    raise NotImplementedError(f"Unsupported dataset '{name}'.")
+
+
+def build_dataset_split(args, split: str) -> Tuple[torch.utils.data.Dataset, int]:
+    split = split.lower()
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"split must be train/val/test, got {split!r}")
+    fn = _resolve_builder(args.dataset)
+    return fn(args, split)
+
+
 def build_dataset(args, is_train: bool) -> Tuple[torch.utils.data.Dataset, int]:
-    name = (args.dataset or "").lower().replace("-", "_")
-
-    # CIFAR
-    if name in ("cifar10",):
-        return _build_cifar10(args, is_train)
-    if name in ("cifar100", "cifar_100"):
-        return _build_cifar100(args, is_train)
-
-    # MNIST family
-    if name in ("mnist",):
-        return _build_mnist(args, is_train)
-    if name in ("fashion_mnist", "fashionmnist"):
-        return _build_fashion_mnist(args, is_train)
-    if name in ("emnist", "emnist_byclass"):
-        return _build_emnist(args, is_train)
-    if name in ("kmnist",):
-        return _build_kmnist(args, is_train)
-    if name in ("qmnist",):
-        return _build_qmnist(args, is_train)
-    if name in ("usps",):
-        return _build_usps(args, is_train)
-
-    # Small/medium classification
-    if name in ("svhn",):
-        return _build_svhn(args, is_train)
-    if name in ("stl10",):
-        return _build_stl10(args, is_train)
-    if name in ("food101", "food_101"):
-        return _build_food101(args, is_train)
-    if name in ("oxfordiiitpet", "oxford_iiit_pet", "pets", "oxford_pets"):
-        return _build_pets(args, is_train)
-    if name in ("flowers102", "oxfordflowers102", "oxford_flowers102"):
-        return _build_flowers102(args, is_train)
-    if name in ("stanford_cars", "stanfordcars", "cars"):
-        return _build_cars(args, is_train)
-
-    # Extra torchvision datasets (auto-download)
-    if name in ("caltech101", "caltech_101"):
-        return _build_caltech101(args, is_train)
-    if name in ("dtd", "describable_textures", "textures"):
-        return _build_dtd(args, is_train)
-    if name in ("eurosat", "euro_sat"):
-        return _build_eurosat(args, is_train)
-    if name in ("fgvc_aircraft", "fgvca", "aircraft"):
-        return _build_fgvc_aircraft(args, is_train)
-    if name in ("sun397", "sun_397"):
-        return _build_sun397(args, is_train)
-    if name in ("gtsrb", "traffic_signs", "german_traffic_signs"):
-        return _build_gtsrb(args, is_train)
-    if name in ("fer2013", "fer_2013"):
-        return _build_fer2013(args, is_train)
-    if name in ("pcam", "patch_camelyon"):
-        return _build_pcam(args, is_train)
-
-    # COCO single-label wrapper
-    if name in ("coco", "coco2017", "mscoco", "mscoco2017"):
-        return _build_coco(args, is_train)
-
-    raise NotImplementedError(f"Unsupported dataset '{args.dataset}'.")
+    """Backward-compatible API: train -> train, eval -> val."""
+    return build_dataset_split(args, "train" if is_train else "val")
