@@ -78,7 +78,7 @@ def get_args_parser():
         type=str,
         default="hcc",
         help=(
-            "full | linear | prompt | conv | adapter | hcc | dt | residual | "
+            "full | linear | prompt | conv | adapter | hcc | dt | bam | residual | "
             "ssf | lora_conv | bitfit | sidetune"
         ),
     )
@@ -118,6 +118,14 @@ def get_args_parser():
     parser.add_argument("--dt_gate_init", type=float, default=None)
     parser.add_argument("--dt_padding", type=str, default=None, choices=["reflect", "replicate", "zeros"])
     parser.add_argument("--dt_use_bn", type=str2bool, default=False)
+
+    # BAM-Tuning baseline (Q1/IJCV CNN attention module adapted to frozen-backbone PEFT)
+    parser.add_argument("--bam_reduction", type=int, default=16)
+    parser.add_argument("--bam_dilation", type=int, default=4)
+    parser.add_argument("--bam_gate_init", type=float, default=0.0)
+    parser.add_argument("--bam_use_bn", type=str2bool, default=True)
+    parser.add_argument("--bam_insert", type=str, default="stage", choices=["stage", "all"])
+    parser.add_argument("--bam_stages", type=str, default="1,2,3,4")
 
     # Residual Adapter
     parser.add_argument("--ra_mode", type=str, default="parallel", choices=["parallel", "series"])
@@ -245,6 +253,9 @@ def canonicalize_args(args):
         "dt1d": "hcc",
         "dt1d_adapter": "hcc",
         "hcc_adapter": "hcc",
+        "bam_adapter": "bam",
+        "bam-tuning": "bam",
+        "bam_tuning": "bam",
         "lora": "lora_conv",
         "lora_conv2d": "lora_conv",
         "ssf_adapter": "ssf",
@@ -278,7 +289,7 @@ def canonicalize_args(args):
     # Full FT should not freeze the backbone. All PEFT modes should freeze by default.
     if args.tuning_method == "full":
         args.freeze_backbone = False
-    elif args.tuning_method in ("linear", "conv", "adapter", "hcc", "residual", "ssf", "lora_conv", "bitfit", "sidetune"):
+    elif args.tuning_method in ("linear", "conv", "adapter", "hcc", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune"):
         args.freeze_backbone = True
 
     return args
@@ -480,6 +491,8 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
         def hook(mod, inputs, out):
             if getattr(mod.pet_adapter, "is_hcc_adapter", False):
                 return mod.pet_adapter(out)
+            if getattr(mod.pet_adapter, "is_bam_adapter", False):
+                return mod.pet_adapter(out)
             if args.tuning_method in ("conv", "adapter"):
                 return out + args.adapt_scale * mod.pet_adapter(out)
             if args.tuning_method == "residual":
@@ -491,7 +504,9 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
 
         module.register_forward_hook(hook)
 
-    for m in model_backbone.modules():
+    # Snapshot modules before adding adapters to avoid recursively attaching
+    # adapters inside newly-created adapter modules.
+    for m in list(model_backbone.modules()):
         if BasicBlock and isinstance(m, BasicBlock):
             attach(m, m.conv2.out_channels)
         elif Bottleneck and isinstance(m, Bottleneck):
@@ -572,6 +587,42 @@ def _add_adapters(model_backbone: nn.Module, args):
 
         _attach_hook_adapters(model_backbone, args, make_adapter)
 
+    elif method == "bam":
+        from models.tuning_modules.bam_adapter import BAMAdapter
+
+        def make_adapter(ch):
+            m = BAMAdapter(
+                channels=ch,
+                reduction=args.bam_reduction,
+                dilation=args.bam_dilation,
+                gate_init=args.bam_gate_init,
+                use_bn=args.bam_use_bn,
+            )
+            m.is_bam_adapter = True
+            return m
+
+        def attach_bam(module: nn.Module, out_ch: int):
+            if hasattr(module, "pet_adapter"):
+                return
+            module.add_module("pet_adapter", make_adapter(out_ch))
+            module.register_forward_hook(lambda mod, _inputs, out: mod.pet_adapter(out))
+
+        if args.bam_insert == "stage" and all(hasattr(model_backbone, f"layer{i}") for i in range(1, 5)):
+            stages = [int(s.strip()) for s in args.bam_stages.split(",") if s.strip().isdigit()]
+            for stage in stages:
+                layer = getattr(model_backbone, f"layer{stage}")
+                block = layer[-1]
+                if hasattr(block, "conv3"):
+                    out_ch = block.conv3.out_channels
+                elif hasattr(block, "conv2"):
+                    out_ch = block.conv2.out_channels
+                else:
+                    raise RuntimeError(f"Cannot infer BAM channels for ResNet stage {stage}")
+                attach_bam(block, out_ch)
+        else:
+            # all-block insertion or non-ResNet fallback
+            _attach_hook_adapters(model_backbone, args, make_adapter)
+
     elif method == "ssf":
         from models.tuning_modules.ssf import SSF
         _attach_hook_adapters(
@@ -602,9 +653,10 @@ def _add_adapters(model_backbone: nn.Module, args):
                     gate_init=args.ra_gate_init,
                     stages=stages,
                 )
+                from models.tuning_modules.residual_adapter import residual_adapter_trainable_parameters
                 for mod in model_backbone.modules():
                     if isinstance(mod, (ParallelResidualAdapter, SeriesResidualAdapter)):
-                        for p in mod.parameters():
+                        for p in residual_adapter_trainable_parameters(mod):
                             adapter_param_ids.add(id(p))
                 return model_backbone, adapter_param_ids
         except Exception as e:
@@ -660,7 +712,7 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
         return model
 
     # PEFT: adapters and task head only.
-    tokens = ("pet_adapter", "hcc", "alpha", "gate", "ssf", "lora", "adapter", "side", "lora_down", "lora_up")
+    tokens = ("pet_adapter", "hcc", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side", "lora_down", "lora_up")
     for name, p in model.named_parameters():
         if _is_head_param(name) or any(tok in name for tok in tokens) or id(p) in extra_adapter_param_ids:
             p.requires_grad = True
@@ -716,7 +768,7 @@ def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
         model = CLIPLinearProbe(clip_visual, int(clip_feat_dim), args.nb_classes, freeze_backbone=bool(args.freeze_backbone))
         return model, set()
 
-    tv_methods = ("full", "linear", "conv", "adapter", "hcc", "residual", "ssf", "lora_conv", "bitfit", "sidetune")
+    tv_methods = ("full", "linear", "conv", "adapter", "hcc", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune")
     if args.tuning_method in tv_methods:
         model_backbone = _build_torchvision_or_hub_backbone(args)
         if args.tuning_method == "sidetune":
@@ -948,7 +1000,7 @@ def main(args):
     for name, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-        is_adapter_like = any(tok in name for tok in ("pet_adapter", "hcc", "alpha", "gate", "ssf", "lora", "adapter", "side")) or id(p) in adapter_param_ids
+        is_adapter_like = any(tok in name for tok in ("pet_adapter", "hcc", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side")) or id(p) in adapter_param_ids
         (adapter_like if is_adapter_like else other).append(p)
     print(f"[ParamGroups] adapter_like={sum(p.numel() for p in adapter_like):,} others={sum(p.numel() for p in other):,}")
 

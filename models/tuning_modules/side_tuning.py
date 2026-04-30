@@ -1,107 +1,127 @@
 # models/tuning_modules/side_tuning.py
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+
 class _SideConvStem(nn.Module):
-    """
-    Lightweight side network: few 3x3 convs + BN + ReLU, then a 1x1 to C channels.
-    """
     def __init__(self, in_ch: int, mid: int, out_ch: int, depth: int = 3):
         super().__init__()
-        layers = [nn.Conv2d(in_ch, mid, 3, padding=1, bias=False),
-                  nn.BatchNorm2d(mid), nn.ReLU(inplace=True)]
-        for _ in range(max(0, depth - 2)):
-            layers += [nn.Conv2d(mid, mid, 3, padding=1, bias=False),
-                       nn.BatchNorm2d(mid), nn.ReLU(inplace=True)]
+        layers = [nn.Conv2d(in_ch, mid, 3, padding=1, bias=False), nn.BatchNorm2d(mid), nn.ReLU(inplace=True)]
+        for _ in range(max(0, int(depth) - 2)):
+            layers += [nn.Conv2d(mid, mid, 3, padding=1, bias=False), nn.BatchNorm2d(mid), nn.ReLU(inplace=True)]
         layers += [nn.Conv2d(mid, out_ch, 1, bias=False)]
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x):              # [B,3,H,W] -> [B,C,H,W]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
 class SideTuningClassifier(nn.Module):
-    """
-    Side-tuning wrapper.
+    """Side-tuning baseline with frozen backbone + trainable side network.
 
-    - Expects a backbone that returns features from .forward_features(x) or plain .forward(x)
-      as either [B,C] or [B,C,H,W].
-    - Keeps the backbone frozen; trains a small side net + classifier head + blend alpha.
-
-    Memory optimization:
-      * Blend AFTER global pooling (vector space [B,C]) to avoid broadcasting over [H,W].
-      * Optional activation checkpointing on side_net to reduce peak VRAM
-        (see torch.utils.checkpoint docs).  # official docs: https://pytorch.org/docs/stable/checkpoint.html
+    Robust to torchvision ResNet-style backbones that expose ``fc.in_features``
+    but not ``num_features``.
     """
-    def __init__(self,
-                 base_model: nn.Module,
-                 num_classes: int,
-                 side_width: int = 64,
-                 side_depth: int = 3,
-                 learn_alpha: bool = True,
-                 alpha_init: float = 0.5,
-                 use_checkpoint: bool = True):
+
+    def __init__(
+        self,
+        base_model: nn.Module = None,
+        num_classes: int = 1000,
+        side_width: int = 64,
+        side_depth: int = 3,
+        learn_alpha: bool = True,
+        alpha_init: float = 0.5,
+        use_checkpoint: bool = False,
+        **legacy,
+    ):
         super().__init__()
-        self.base = base_model
-        self.use_checkpoint = use_checkpoint
+        if base_model is None:
+            base_model = legacy.pop("base_backbone", None)
+        if base_model is None:
+            raise TypeError("SideTuningClassifier requires base_model or legacy base_backbone.")
 
-        # Freeze the base
+        self.base = base_model
+        self.use_checkpoint = bool(use_checkpoint)
         for p in self.base.parameters():
             p.requires_grad = False
 
-        # Infer base feature dim C
-        C = getattr(self.base, 'num_features', None)
-        if C is None:
-            raise RuntimeError("Backbone must expose .num_features (int)")
+        channels = self._infer_feature_dim(self.base)
+        self.num_features = channels
+        self.side_net = _SideConvStem(3, side_width, channels, depth=side_depth)
 
-        # Small side-net that maps image -> [B, C, H, W]
-        self.side_net = _SideConvStem(3, side_width, C, depth=side_depth)
-
-        # Alpha in (0,1) via logit parameterization
-        a0 = float(alpha_init)
-        a0 = min(max(a0, 0.0), 1.0)
-        eps = 1e-4
-        a0 = max(min(a0, 1.0 - eps), eps)
+        a0 = min(max(float(alpha_init), 1e-4), 1.0 - 1e-4)
         a0_t = torch.tensor(a0)
-        self.alpha_logit = nn.Parameter(torch.log(a0_t / (1.0 - a0_t)),
-                                        requires_grad=learn_alpha)
-
-        # Pool + classifier
+        self.alpha_logit = nn.Parameter(torch.log(a0_t / (1.0 - a0_t)), requires_grad=learn_alpha)
         self.pool = nn.AdaptiveAvgPool2d(1)
-        self.head = nn.Linear(C, num_classes)
+        self.head = nn.Linear(channels, num_classes)
+
+    @staticmethod
+    def _infer_feature_dim(base: nn.Module) -> int:
+        for attr in ("num_features", "feature_dim", "embed_dim"):
+            val = getattr(base, attr, None)
+            if isinstance(val, int) and val > 0:
+                return val
+        if hasattr(base, "fc") and isinstance(base.fc, nn.Linear):
+            return int(base.fc.in_features)
+        if hasattr(base, "classifier"):
+            clf = base.classifier
+            if isinstance(clf, nn.Linear):
+                return int(clf.in_features)
+            if isinstance(clf, nn.Sequential):
+                for m in reversed(clf):
+                    if isinstance(m, nn.Linear):
+                        return int(m.in_features)
+        if hasattr(base, "head") and isinstance(base.head, nn.Linear):
+            return int(base.head.in_features)
+        raise RuntimeError("Cannot infer base feature dimension for side-tuning.")
 
     @property
-    def alpha(self):
+    def alpha(self) -> torch.Tensor:
         return torch.sigmoid(self.alpha_logit)
 
+    def _base_feats_resnet(self, x: torch.Tensor) -> torch.Tensor:
+        b = self.base
+        x = b.conv1(x)
+        x = b.bn1(x)
+        x = b.relu(x)
+        x = b.maxpool(x)
+        x = b.layer1(x)
+        x = b.layer2(x)
+        x = b.layer3(x)
+        x = b.layer4(x)
+        x = b.avgpool(x)
+        return torch.flatten(x, 1)
+
     def _base_feats(self, x: torch.Tensor) -> torch.Tensor:
-        # No grad on the frozen backbone
         with torch.no_grad():
-            if hasattr(self.base, 'forward_features'):
-                b = self.base.forward_features(x)
+            if all(hasattr(self.base, a) for a in ("conv1", "bn1", "relu", "layer1", "layer2", "layer3", "layer4", "avgpool")):
+                out = self._base_feats_resnet(x)
+            elif hasattr(self.base, "forward_features"):
+                out = self.base.forward_features(x)
             else:
-                b = self.base(x)
-        if b.dim() == 4:
-            b = self.pool(b).flatten(1)
-        return b  # [B, C]
+                out = self.base(x)
+        if out.dim() == 4:
+            out = self.pool(out).flatten(1)
+        return out
 
     def _side_feats(self, x: torch.Tensor) -> torch.Tensor:
-        # Optionally activation checkpoint the side path
         if self.training and self.use_checkpoint:
-            s = checkpoint(self.side_net, x)
+            side = checkpoint(self.side_net, x)
         else:
-            s = self.side_net(x)
-        s = self.pool(s).flatten(1)    # [B, C]
-        return s
+            side = self.side_net(x)
+        return self.pool(side).flatten(1)
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
-        b_vec = self._base_feats(x)    # [B, C], no grad
-        s_vec = self._side_feats(x)    # [B, C], trainable
+        base_vec = self._base_feats(x)
+        side_vec = self._side_feats(x)
         a = self.alpha
-        fused = (1.0 - a) * b_vec + a * s_vec
-        return fused                   # [B, C]
+        return (1.0 - a) * base_vec + a * side_vec
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.forward_features(x)   # [B, C]
-        return self.head(z)            # [B, num_classes]
+        return self.head(self.forward_features(x))
+
+
+__all__ = ["SideTuningClassifier"]
