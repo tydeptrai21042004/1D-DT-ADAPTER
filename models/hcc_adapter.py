@@ -5,9 +5,10 @@ DT1D-Adapter / HCCAdapter
 A lightweight spatial PEFT adapter based on finite weighted h-Hartley-cosine
 axial convolution.
 
-This version implements two revised-method changes:
-    1. Finite weighted h-Hartley-cosine axial convolution kernels.
-    2. Optional input-adaptive axis--scale routing gates.
+This static-gate version keeps the new finite weighted h-Hartley-cosine
+axial convolution kernels, but removes the input-adaptive GAP-MLP router.
+Axis--scale responses are fused by the old global learnable softmax logits,
+so the parameter count remains close to the original DT1D design.
 
 Backward compatibility:
     * If `dilations=None` and `scale_adaptive=False`, the module behaves like the
@@ -15,8 +16,8 @@ Backward compatibility:
       responses are averaged in two-axis mode, but each branch uses the finite
       weighted h-Hartley-cosine axial kernel.
     * If `dilations=(1, 2, 4)` or `scale_adaptive=True`, the module evaluates
-      multiple axial responses and combines them with either global softmax gates
-      or input-adaptive routing weights over axis--dilation pairs.
+      multiple axial responses and combines them with global/static softmax gates
+      over axis--dilation pairs.
 
 Backward-compatible aliases are kept:
     HCCAdapter = DT1DAdapter
@@ -87,8 +88,8 @@ class DT1DAdapter(nn.Module):
         scale_adaptive: bool = False,
         separate_axis_kernels: bool = True,
         gate_temperature: float = 1.0,
-        input_adaptive_gate: bool = True,
-        gate_reduction: int = 4,
+        input_adaptive_gate: bool = False,  # deprecated/ignored; kept for CLI compatibility
+        gate_reduction: int = 4,            # deprecated/ignored; kept for CLI compatibility
         **legacy,
     ):
         super().__init__()
@@ -110,10 +111,10 @@ class DT1DAdapter(nn.Module):
             no_pw = not use_pw_legacy
         if "hcc_dilations" in legacy and dilations is None:
             dilations = legacy.pop("hcc_dilations")
-        if "hcc_input_adaptive_gate" in legacy:
-            input_adaptive_gate = bool(legacy.pop("hcc_input_adaptive_gate"))
-        if "hcc_gate_reduction" in legacy:
-            gate_reduction = int(legacy.pop("hcc_gate_reduction"))
+        # Deprecated input-adaptive routing options are accepted for backward
+        # CLI compatibility but intentionally ignored in this static-gate version.
+        legacy.pop("hcc_input_adaptive_gate", None)
+        legacy.pop("hcc_gate_reduction", None)
         # Keep unknown legacy kwargs harmless, because older main.py may pass unused flags.
 
         self.C = int(C)
@@ -134,7 +135,9 @@ class DT1DAdapter(nn.Module):
         # For backward compatibility, single-dilation non-adaptive mode shares the old kernel.
         self.separate_axis_kernels = bool(separate_axis_kernels and self.scale_adaptive)
         self.gate_temperature = float(gate_temperature)
-        self.input_adaptive_gate = bool(input_adaptive_gate and self.scale_adaptive)
+        # The GAP-MLP input-adaptive router has been removed. Keep these attributes
+        # only so older scripts/checkpoints that inspect them do not fail.
+        self.input_adaptive_gate = False
         self.gate_reduction = max(1, int(gate_reduction))
 
         if self.C <= 0:
@@ -161,29 +164,15 @@ class DT1DAdapter(nn.Module):
         with torch.no_grad():
             self.alpha[..., 0].fill_(1.0)  # identity-like axial filter before residual gate
 
-        # Global axis--scale logits. In input-adaptive mode these act as learnable
-        # bias/prior logits and the routing MLP adds sample-dependent offsets.
+        # Static/global axis--scale logits. This is the old DT1D fusion mechanism:
+        # one small set of learnable logits is shared by all input samples.
+        # For A=2 axes and S=3 dilation scales this adds only A*S=6 parameters
+        # per inserted adapter. No GAP-MLP router is created.
         if self.scale_adaptive:
             self.axis_scale_logits = nn.Parameter(torch.zeros(self.num_axes, self.num_scales))
         else:
             self.register_parameter("axis_scale_logits", None)
-
-        # Input-adaptive routing:
-        #   r(x)=GAP(x), eta(x)=W2(ReLU(W1 r(x))),
-        #   pi_{b,u,s}=softmax((eta_{b,u,s}+global_logit_{u,s})/tau).
-        # The final Linear is zero-initialized, so training starts from uniform/global
-        # routing while still allowing sample-specific gates to emerge.
-        if self.input_adaptive_gate:
-            route_hidden = max(1, self.C // self.gate_reduction)
-            self.axis_scale_router = nn.Sequential(
-                nn.Linear(self.C, route_hidden, bias=True),
-                nn.ReLU(inplace=True),
-                nn.Linear(route_hidden, self.num_axes * self.num_scales, bias=True),
-            )
-            nn.init.zeros_(self.axis_scale_router[-1].weight)
-            nn.init.zeros_(self.axis_scale_router[-1].bias)
-        else:
-            self.axis_scale_router = None
+        self.axis_scale_router = None
 
         # Optional grouped pointwise channel mixing.
         if not self.no_pw:
@@ -211,7 +200,7 @@ class DT1DAdapter(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"C={self.C}, M={self.M}, dilations={self.dilations}, axis={self.axis}, "
-            f"scale_adaptive={self.scale_adaptive}, input_adaptive_gate={self.input_adaptive_gate}, "
+            f"scale_adaptive={self.scale_adaptive}, static_axis_scale_gate=True, "
             f"separate_axis_kernels={self.separate_axis_kernels}, "
             f"alpha_group={self.alpha_group}, G={self.num_alpha_groups}, "
             f"no_pw={self.no_pw}, gate={float(self.gate.detach().cpu()):.4g}"
@@ -220,42 +209,36 @@ class DT1DAdapter(nn.Module):
     def parameter_count_breakdown(self) -> Dict[str, int]:
         axial = self.alpha.numel() + self.gate.numel()
         axis_scale = 0 if self.axis_scale_logits is None else self.axis_scale_logits.numel()
-        router = 0 if self.axis_scale_router is None else sum(p.numel() for p in self.axis_scale_router.parameters())
         pw = sum(p.numel() for p in self.pw.parameters())
         return {
             "axial_alpha_and_gate": int(axial),
             "axis_scale_logits": int(axis_scale),
-            "axis_scale_router": int(router),
             "pointwise": int(pw),
-            "total": int(axial + axis_scale + router + pw),
+            "total": int(axial + axis_scale + pw),
         }
 
     def axis_scale_weights(self, x: Optional[torch.Tensor] = None) -> Optional[torch.Tensor]:
-        """Return softmax axis--scale weights.
+        """Return detached static softmax weights with shape (num_axes, num_scales).
 
-        If ``x`` is provided and input-adaptive routing is enabled, the return shape
-        is ``(B, num_axes, num_scales)``. Otherwise, the return shape is
-        ``(num_axes, num_scales)`` for the global/static routing weights.
+        The optional ``x`` argument is ignored and kept only for compatibility with
+        earlier input-adaptive experiments.
         """
         if self.axis_scale_logits is None:
             return None
-        if x is not None and self.input_adaptive_gate:
-            return self._compute_axis_scale_weights(x).detach()
         logits = self.axis_scale_logits.detach() / self.gate_temperature
         return torch.softmax(logits.reshape(-1), dim=0).reshape(self.num_axes, self.num_scales)
 
-    def _compute_axis_scale_weights(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute routing weights with shape (B, num_axes, num_scales)."""
+    def _compute_axis_scale_weights(
+        self,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Compute static routing weights with shape (num_axes, num_scales)."""
         if self.axis_scale_logits is None:
             raise RuntimeError("Axis--scale weights are only defined in scale_adaptive mode.")
-        B = x.shape[0]
-        logits = self.axis_scale_logits.to(device=x.device, dtype=x.dtype).unsqueeze(0).expand(B, -1, -1)
-        if self.axis_scale_router is not None:
-            pooled = F.adaptive_avg_pool2d(x, output_size=1).flatten(1)
-            route_logits = self.axis_scale_router(pooled).reshape(B, self.num_axes, self.num_scales)
-            logits = logits + route_logits.to(device=x.device, dtype=x.dtype)
-        weights = torch.softmax((logits / self.gate_temperature).reshape(B, -1), dim=1)
-        return weights.reshape(B, self.num_axes, self.num_scales)
+        logits = self.axis_scale_logits.to(device=device, dtype=dtype) / self.gate_temperature
+        weights = torch.softmax(logits.reshape(-1), dim=0)
+        return weights.reshape(self.num_axes, self.num_scales)
 
     def _expand_group_kernel_to_channels(self, wg: torch.Tensor) -> torch.Tensor:
         """Expand group-shared kernels from (G, K) to depthwise kernels (C, 1, K)."""
@@ -374,16 +357,15 @@ class DT1DAdapter(nn.Module):
         if x.shape[1] != self.C:
             raise ValueError(f"Channel mismatch: adapter C={self.C}, input C={x.shape[1]}")
 
-        # Step 2 path: mixture over axis--dilation responses. The weights are
-        # either global/static or input-adaptive per sample.
+        # Step 2 path: static/global mixture over axis--dilation responses.
         if self.scale_adaptive:
-            weights = self._compute_axis_scale_weights(x).to(device=x.device, dtype=x.dtype)  # (B, A, S)
+            weights = self._compute_axis_scale_weights(x.device, x.dtype)  # (A, S)
             y = torch.zeros_like(x)
             for ai, axis_name in enumerate(self.axis_names):
                 for si, dilation in enumerate(self.dilations):
                     w1d = self._build_weighted_hcc_kernel_1d(ai, si, x.device, x.dtype)
                     yi = self._conv_axis(x, axis_name, w1d, dilation)
-                    y = y + weights[:, ai, si].view(-1, 1, 1, 1) * yi
+                    y = y + weights[ai, si] * yi
         else:
             # Single-dilation path: average selected weighted-HCC axial responses to
             # preserve the response scale when both axes are enabled.

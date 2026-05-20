@@ -1,0 +1,72 @@
+%%bash
+set -Eeuo pipefail
+
+REPO_URL="${REPO_URL:-https://github.com/tydeptrai21042004/1D-DT-ADAPTER.git}"
+WORKDIR="${WORKDIR:-/kaggle/working}"
+REPO_DIR="${REPO_DIR:-$WORKDIR/1D-DT-ADAPTER}"
+DATA_DIR="${DATA_DIR:-$WORKDIR/data}"
+OUT_ROOT="${OUT_ROOT:-$WORKDIR/dt1d_revision_outputs_whc_static}"
+DEVICE_REQUEST="${DEVICE:-cuda}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+SEED="${SEED:-0}"
+FORCE="${FORCE:-0}"
+FAST_DEBUG="${FAST_DEBUG:-0}"
+MAX_WALL_MIN="${MAX_WALL_MIN:-680}"
+GUARD_MIN="${GUARD_MIN:-30}"
+RUN_REALTIME="${RUN_REALTIME:-1}"
+
+mkdir -p "$WORKDIR" "$DATA_DIR" "$OUT_ROOT"
+SCRIPT_START_TS="$(date +%s)"
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$OUT_ROOT/run.log"; }
+elapsed_min(){ echo $(( ($(date +%s) - SCRIPT_START_TS) / 60 )); }
+remaining_min(){ echo $(( MAX_WALL_MIN - $(elapsed_min) )); }
+can_start(){ local r; r="$(remaining_min)"; if (( r <= GUARD_MIN )); then log "Time guard reached. Remaining=${r} min."; return 1; fi; return 0; }
+run_cmd(){
+  local name="$1"; shift; local out="$1"; shift; mkdir -p "$out"
+  if [[ "$FORCE" != "1" && ( -f "$out/test_summary.json" || -f "$out/summary.json" ) ]]; then log "SKIP $name"; echo -e "$name\tSKIP\t0\t$out" >> "$OUT_ROOT/status.tsv"; return 0; fi
+  can_start || return 0; log "START $name"; set +e; "$@" 2>&1 | tee "$out/stdout.log"; local code=${PIPESTATUS[0]}; set -e
+  if [[ $code -ne 0 ]]; then log "FAILED $name with code $code"; echo -e "$name\tFAILED\t$code\t$out" >> "$OUT_ROOT/status.tsv"; return 0; fi
+  log "DONE $name"; echo -e "$name\tDONE\t0\t$out" >> "$OUT_ROOT/status.tsv"
+}
+
+python -m pip install -q --upgrade pip
+python -m pip install -q timm pandas thop fvcore torchmetrics pycocotools opencv-python-headless pytest
+if [[ ! -d "$REPO_DIR/.git" ]]; then git clone "$REPO_URL" "$REPO_DIR"; else git -C "$REPO_DIR" pull --ff-only || true; fi
+cd "$REPO_DIR"
+if [[ ! -f "$OUT_ROOT/status.tsv" ]]; then echo -e "name\tstatus\tcode\tout_dir" > "$OUT_ROOT/status.tsv"; fi
+
+read DEVICE USE_AMP PROFILE_EFF MEASURE_LAT PIN_MEM < <(python - <<'PY'
+import os, sys
+req=os.environ.get('DEVICE', os.environ.get('DEVICE_REQUEST','cuda')).lower(); device='cpu'; use_amp='False'; profile='False'; lat='False'; pin='False'
+try:
+ import torch
+ if req.startswith('cuda') and torch.cuda.is_available():
+  cap=torch.cuda.get_device_capability(0); name=torch.cuda.get_device_name(0); print(f"[DeviceCheck] {name} capability={cap}", file=sys.stderr)
+  if cap[0] >= 7: device='cuda'; use_amp='True'; profile='True'; lat='True'; pin='True'
+  else: print('[DeviceCheck] capability <7.0; using CPU.', file=sys.stderr)
+except Exception as e: print(f'[DeviceCheck] {e}; using CPU.', file=sys.stderr)
+print(device,use_amp,profile,lat,pin)
+PY
+)
+log "Resolved device=$DEVICE use_amp=$USE_AMP profile_efficiency=$PROFILE_EFF latency=$MEASURE_LAT pin_mem=$PIN_MEM"
+if [[ "$DEVICE" == "cpu" ]]; then NUM_WORKERS="${CPU_NUM_WORKERS:-2}"; if [[ "${CPU_FORCE_FAST_DEBUG:-0}" == "1" ]]; then FAST_DEBUG=1; fi; fi
+PYTHONPATH="$REPO_DIR" python tools/preflight_whc_dt1d_static.py --device auto || true
+
+DT_ARGS=(--tuning_method dt --dt_M 1 --dt_h 1 --dt_dilations 1,2,4 --dt_scale_adaptive True --dt_separate_axis_kernels True --dt_gate_temperature 1.0 --dt_axis hw --dt_alpha_group 16 --dt_pw_ratio 32 --dt_pw_groups 4 --dt_gate_init 0.01 --dt_padding reflect --adapt_scale 1.0 --dt_input_adaptive_gate False)
+COMMON_ARGS=(--data_path "$DATA_DIR" --device "$DEVICE" --weights DEFAULT --input_size 224 --imagenet_norm True --imagenet_default_mean_and_std True --freeze_backbone True --final_test True --save_history True --profile_efficiency "$PROFILE_EFF" --profile_batch_size 16 --measure_eval_latency "$MEASURE_LAT" --dist_eval False --enable_wandb False --num_workers "$NUM_WORKERS" --use_amp "$USE_AMP" --pin_mem "$PIN_MEM")
+run_cls(){
+  local name="$1" dataset="$2" backbone="$3" epochs="$4" batch="$5" out="$6"
+  if [[ "$FAST_DEBUG" == "1" ]]; then epochs=1; batch=$(( batch > 16 ? 16 : batch )); fi
+  if [[ "$DEVICE" == "cpu" ]]; then batch=$(( batch > 16 ? 16 : batch )); fi
+  run_cmd "$name" "$out" python main.py --dataset "$dataset" --backbone "$backbone" --epochs "$epochs" --batch_size "$batch" --seed "$SEED" --output_dir "$out" "${COMMON_ARGS[@]}" "${DT_ARGS[@]}"
+}
+
+run_cls "P2_Flowers102_ResNet18_10ep_bs64_WHC_Static" flowers102 resnet18 10 64 "$OUT_ROOT/part2_classification/flowers102/resnet18_10ep_bs64/whc_dt1d_static/seed_${SEED}"
+run_cls "P2_Flowers102_ResNet18_100ep_bs64_WHC_Static" flowers102 resnet18 100 64 "$OUT_ROOT/part2_classification/flowers102/resnet18_100ep_bs64/whc_dt1d_static/seed_${SEED}"
+run_cls "P2_Flowers102_ResNet18_100ep_bs32_WHC_Static" flowers102 resnet18 100 32 "$OUT_ROOT/part2_classification/flowers102/resnet18_100ep_bs32/whc_dt1d_static/seed_${SEED}"
+run_cls "P2_Food101_EfficientNetB0_10ep_WHC_Static" food101 efficientnet_b0 10 64 "$OUT_ROOT/part2_classification/food101/efficientnet_b0/whc_dt1d_static/seed_${SEED}"
+run_cls "P2_Pet_EfficientNetB0_10ep_WHC_Static" oxfordiiitpet efficientnet_b0 10 64 "$OUT_ROOT/part2_classification/oxfordiiitpet/efficientnet_b0_10ep/whc_dt1d_static/seed_${SEED}"
+run_cls "P2_Pet_EfficientNetB0_100ep_WHC_Static" oxfordiiitpet efficientnet_b0 100 64 "$OUT_ROOT/part2_classification/oxfordiiitpet/efficientnet_b0_100ep/whc_dt1d_static/seed_${SEED}"
+
+python tools/aggregate_revision_results.py --root "$OUT_ROOT/part2_classification" --out_csv "$OUT_ROOT/part2_whc_static_classification_summary.csv" || true
+log "CELL 2 FINISHED. Outputs are in $OUT_ROOT"
