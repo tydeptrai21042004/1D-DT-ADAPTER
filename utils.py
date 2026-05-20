@@ -497,6 +497,18 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, mo
             os.remove(old_ckpt)
 
 
+def safe_torch_load(path, map_location="cpu"):
+    """Load a trusted checkpoint across PyTorch versions.
+
+    PyTorch 2.6 defaults torch.load to weights_only=True, which can fail for
+    training checkpoints that store argparse.Namespace or NumPy scalars.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, model_ema=None):
     output_dir = Path(args.output_dir)
     if args.auto_resume and len(args.resume) == 0:
@@ -516,7 +528,7 @@ def auto_load_model(args, model, model_without_ddp, optimizer, loss_scaler, mode
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = safe_torch_load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
