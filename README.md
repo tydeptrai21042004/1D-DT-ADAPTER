@@ -8,11 +8,6 @@ This project keeps the Conv-Adapter training pipeline and adds a **1D dilated-ta
 - optional grouped `1×1` bottleneck channel mixing,
 - and a safe residual gate for stable initialization.
 
-> **Manuscript-linked repository**  
-> This code is associated with:  
-> **A Lightweight Adapter for Efficient Fine-Tuning in Computer Vision** (February 2026)  
-> DOI: **10.21203/rs.3.rs-8843187/v1**
-
 ---
 
 ## Highlights
@@ -240,21 +235,6 @@ Recommended additions for the repo:
 
 If you use this repository, please cite the associated manuscript:
 
-### Paper (February 2026)
-
-**A Lightweight Adapter for Efficient Fine-Tuning in Computer Vision** ( preprint )
-DOI: **10.21203/rs.3.rs-8843187/v1**
-
-```bibtex
-@article{tran2026lightweightadapter,
-  title   = {A Lightweight Adapter for Efficient Fine-Tuning in Computer Vision},
-  author  = {Tran, Kim Huong and Dang, Ba Ty},
-  year    = {2026},
-  month   = feb,
-  doi     = {10.21203/rs.3.rs-8843187/v1},
-  url     = {https://doi.org/10.21203/rs.3.rs-8843187/v1}
-}
-```
 
 ### Baseline / training pipeline inspiration (Conv-Adapter)
 
