@@ -101,6 +101,8 @@ def get_args_parser():
     parser.add_argument("--hcc_scale_adaptive", type=str2bool, default=False, help="Enable learnable axis--scale gates for DT1D.")
     parser.add_argument("--hcc_separate_axis_kernels", type=str2bool, default=True, help="Use separate group-shared kernels for each axis and dilation when scale-adaptive DT1D is enabled.")
     parser.add_argument("--hcc_gate_temperature", type=float, default=1.0, help="Softmax temperature for DT1D axis--scale gates.")
+    parser.add_argument("--hcc_input_adaptive_gate", type=str2bool, default=True, help="Use GAP-MLP input-adaptive routing over DT1D axis--scale branches.")
+    parser.add_argument("--hcc_gate_reduction", type=int, default=4, help="Reduction ratio for the DT1D input-adaptive routing MLP.")
     parser.add_argument("--hcc_M", type=int, default=1)
     parser.add_argument("--hcc_axis", type=str, default="hw", choices=["h", "w", "hw"])
     parser.add_argument("--hcc_padding", type=str, default="reflect", choices=["reflect", "replicate", "zeros"])
@@ -118,6 +120,8 @@ def get_args_parser():
     parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable axis--scale gates for DT1D.")
     parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None, help="Use separate group-shared kernels for each axis and dilation.")
     parser.add_argument("--dt_gate_temperature", type=float, default=None, help="Softmax temperature for DT1D axis--scale gates.")
+    parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Use GAP-MLP input-adaptive routing over DT1D axis--scale branches.")
+    parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Reduction ratio for the DT1D input-adaptive routing MLP.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
     parser.add_argument("--dt_alpha_group", type=int, default=16)
     parser.add_argument("--dt_no_pw", type=str2bool, default=None)
@@ -291,6 +295,10 @@ def canonicalize_args(args):
         args.hcc_separate_axis_kernels = args.dt_separate_axis_kernels
     if args.dt_gate_temperature is not None:
         args.hcc_gate_temperature = args.dt_gate_temperature
+    if args.dt_input_adaptive_gate is not None:
+        args.hcc_input_adaptive_gate = args.dt_input_adaptive_gate
+    if args.dt_gate_reduction is not None:
+        args.hcc_gate_reduction = args.dt_gate_reduction
     if args.dt_axis is not None:
         args.hcc_axis = args.dt_axis
     if args.dt_padding is not None:
@@ -589,6 +597,8 @@ def _add_adapters(model_backbone: nn.Module, args):
                 scale_adaptive=args.hcc_scale_adaptive,
                 separate_axis_kernels=args.hcc_separate_axis_kernels,
                 gate_temperature=args.hcc_gate_temperature,
+                input_adaptive_gate=args.hcc_input_adaptive_gate,
+                gate_reduction=args.hcc_gate_reduction,
                 axis=args.hcc_axis,
                 alpha_group=args.dt_alpha_group,
                 per_channel=args.hcc_per_channel,
