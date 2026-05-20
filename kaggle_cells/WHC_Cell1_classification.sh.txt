@@ -1,0 +1,203 @@
+%%bash
+set -Eeuo pipefail
+
+REPO_URL="${REPO_URL:-https://github.com/tydeptrai21042004/1D-DT-ADAPTER.git}"
+WORKDIR="${WORKDIR:-/kaggle/working}"
+REPO_DIR="${REPO_DIR:-$WORKDIR/1D-DT-ADAPTER}"
+DATA_DIR="${DATA_DIR:-$WORKDIR/data}"
+OUT_ROOT="${OUT_ROOT:-$WORKDIR/dt1d_revision_outputs_whc}"
+DEVICE_REQUEST="${DEVICE:-cuda}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+SEED="${SEED:-0}"
+FORCE="${FORCE:-0}"
+FAST_DEBUG="${FAST_DEBUG:-0}"
+MAX_WALL_MIN="${MAX_WALL_MIN:-680}"
+GUARD_MIN="${GUARD_MIN:-30}"
+
+mkdir -p "$WORKDIR" "$DATA_DIR" "$OUT_ROOT"
+SCRIPT_START_TS="$(date +%s)"
+
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$OUT_ROOT/run.log"; }
+elapsed_min(){ echo $(( ($(date +%s) - SCRIPT_START_TS) / 60 )); }
+remaining_min(){ echo $(( MAX_WALL_MIN - $(elapsed_min) )); }
+
+can_start(){
+  local r; r="$(remaining_min)"
+  if (( r <= GUARD_MIN )); then
+    log "Time guard reached. Remaining=${r} min. Re-run this cell later to resume."
+    return 1
+  fi
+  return 0
+}
+
+run_cmd(){
+  local name="$1"; shift
+  local out="$1"; shift
+  mkdir -p "$out"
+
+  if [[ "$FORCE" != "1" && ( -f "$out/test_summary.json" || -f "$out/summary.json" ) ]]; then
+    log "SKIP $name"
+    echo -e "$name\tSKIP\t0\t$out" >> "$OUT_ROOT/status.tsv"
+    return 0
+  fi
+
+  can_start || return 0
+  log "START $name"
+  set +e
+  "$@" 2>&1 | tee "$out/stdout.log"
+  local code=${PIPESTATUS[0]}
+  set -e
+
+  if [[ $code -ne 0 ]]; then
+    log "FAILED $name with code $code"
+    echo -e "$name\tFAILED\t$code\t$out" >> "$OUT_ROOT/status.tsv"
+    return 0
+  fi
+
+  log "DONE $name"
+  echo -e "$name\tDONE\t0\t$out" >> "$OUT_ROOT/status.tsv"
+}
+
+log "Installing dependencies"
+python -m pip install -q --upgrade pip
+python -m pip install -q timm pandas thop fvcore torchmetrics pycocotools opencv-python-headless pytest
+
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+  git clone "$REPO_URL" "$REPO_DIR"
+else
+  git -C "$REPO_DIR" pull --ff-only || true
+fi
+
+cd "$REPO_DIR"
+git rev-parse HEAD | tee "$OUT_ROOT/git_commit.txt"
+
+if [[ ! -f "$OUT_ROOT/status.tsv" ]]; then
+  echo -e "name\tstatus\tcode\tout_dir" > "$OUT_ROOT/status.tsv"
+fi
+
+# Device resolver: avoids P100 sm_60 crash with recent PyTorch wheels.
+read DEVICE USE_AMP PROFILE_EFF MEASURE_LAT PIN_MEM < <(python - <<'PY'
+import os, sys
+req = os.environ.get("DEVICE", os.environ.get("DEVICE_REQUEST", "cuda")).lower()
+device, use_amp, profile_eff, measure_lat, pin_mem = "cpu", "False", "False", "False", "False"
+try:
+    import torch
+    if req.startswith("cuda") and torch.cuda.is_available():
+        cap = torch.cuda.get_device_capability(0)
+        name = torch.cuda.get_device_name(0)
+        print(f"[DeviceCheck] Found CUDA GPU: {name}, capability={cap}", file=sys.stderr)
+        if cap[0] >= 7:
+            device, use_amp, profile_eff, measure_lat, pin_mem = "cuda", "True", "True", "True", "True"
+        else:
+            print("[DeviceCheck] capability < 7.0; falling back to CPU", file=sys.stderr)
+    else:
+        print("[DeviceCheck] CUDA unavailable or not requested; using CPU", file=sys.stderr)
+except Exception as e:
+    print(f"[DeviceCheck] Failed: {e}; using CPU", file=sys.stderr)
+print(device, use_amp, profile_eff, measure_lat, pin_mem)
+PY
+)
+log "Resolved device=$DEVICE use_amp=$USE_AMP profile_efficiency=$PROFILE_EFF latency=$MEASURE_LAT pin_mem=$PIN_MEM"
+
+if [[ "$DEVICE" == "cpu" ]]; then
+  NUM_WORKERS="${CPU_NUM_WORKERS:-2}"
+  if [[ "${CPU_FORCE_FAST_DEBUG:-0}" == "1" ]]; then FAST_DEBUG=1; fi
+fi
+
+# Mandatory preflight before long experiments.
+run_cmd "PREFLIGHT_WHC_DT1D" "$OUT_ROOT/preflight" \
+  env PYTHONPATH="$REPO_DIR" python tools/preflight_whc_dt1d.py --device "$DEVICE"
+
+python main.py --help > "$OUT_ROOT/main_help.txt" || true
+EXTRA_GATE_ARGS=()
+if grep -q -- "--dt_input_adaptive_gate" "$OUT_ROOT/main_help.txt"; then
+  EXTRA_GATE_ARGS+=(--dt_input_adaptive_gate True)
+elif grep -q -- "--hcc_input_adaptive_gate" "$OUT_ROOT/main_help.txt"; then
+  EXTRA_GATE_ARGS+=(--hcc_input_adaptive_gate True)
+fi
+if grep -q -- "--dt_gate_reduction" "$OUT_ROOT/main_help.txt"; then
+  EXTRA_GATE_ARGS+=(--dt_gate_reduction 4)
+elif grep -q -- "--hcc_gate_reduction" "$OUT_ROOT/main_help.txt"; then
+  EXTRA_GATE_ARGS+=(--hcc_gate_reduction 4)
+fi
+
+DT_ARGS=(
+  --tuning_method dt
+  --dt_M 1
+  --dt_h 1
+  --dt_dilations 1,2,4
+  --dt_scale_adaptive True
+  --dt_separate_axis_kernels True
+  --dt_gate_temperature 1.0
+  --dt_axis hw
+  --dt_alpha_group 16
+  --dt_pw_ratio 32
+  --dt_pw_groups 4
+  --dt_gate_init 0.01
+  --dt_padding reflect
+  --adapt_scale 1.0
+  "${EXTRA_GATE_ARGS[@]}"
+)
+
+COMMON_ARGS=(
+  --data_path "$DATA_DIR"
+  --device "$DEVICE"
+  --weights DEFAULT
+  --input_size 224
+  --imagenet_norm True
+  --imagenet_default_mean_and_std True
+  --freeze_backbone True
+  --final_test True
+  --save_history True
+  --profile_efficiency "$PROFILE_EFF"
+  --profile_batch_size 16
+  --measure_eval_latency "$MEASURE_LAT"
+  --dist_eval False
+  --enable_wandb False
+  --num_workers "$NUM_WORKERS"
+  --use_amp "$USE_AMP"
+  --pin_mem "$PIN_MEM"
+)
+
+run_cls(){
+  local name="$1" dataset="$2" backbone="$3" epochs="$4" batch="$5" update_freq="$6" out="$7"
+  if [[ "$FAST_DEBUG" == "1" ]]; then epochs=1; batch=$(( batch > 8 ? 8 : batch )); update_freq=1; fi
+  if [[ "$DEVICE" == "cpu" ]]; then batch=$(( batch > 8 ? 8 : batch )); update_freq=1; fi
+  run_cmd "$name" "$out" \
+    env PYTHONPATH="$REPO_DIR" python main.py \
+      --dataset "$dataset" \
+      --backbone "$backbone" \
+      --epochs "$epochs" \
+      --batch_size "$batch" \
+      --update_freq "$update_freq" \
+      --seed "$SEED" \
+      --output_dir "$out" \
+      "${COMMON_ARGS[@]}" \
+      "${DT_ARGS[@]}"
+}
+
+# ResNet50 uses smaller physical batch + update_freq to avoid OOM while preserving effective batch.
+run_cls "P1_DTD_or_DFD_ResNet50_100ep_WHC_InputAdaptive" dtd resnet50 100 16 8 \
+  "$OUT_ROOT/part1_classification/dtd/resnet50/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P1_Flowers102_ResNet50_100ep_WHC_InputAdaptive" flowers102 resnet50 100 16 8 \
+  "$OUT_ROOT/part1_classification/flowers102/resnet50/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P1_SVHN_ResNet50_10ep_WHC_InputAdaptive" svhn resnet50 10 16 8 \
+  "$OUT_ROOT/part1_classification/svhn/resnet50/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P1_Pet_ResNet50_10ep_WHC_InputAdaptive" oxfordiiitpet resnet50 10 16 8 \
+  "$OUT_ROOT/part1_classification/oxfordiiitpet/resnet50/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P1_Food101_ResNet18_10ep_WHC_InputAdaptive" food101 resnet18 10 32 1 \
+  "$OUT_ROOT/part1_classification/food101/resnet18/whc_dt1d_input_adaptive/seed_${SEED}"
+
+EUROSAT_EPOCHS="${EUROSAT_EPOCHS:-24}"
+if [[ "$FAST_DEBUG" == "1" ]]; then EUROSAT_EPOCHS=1; fi
+run_cls "P1_EuroSAT_MobileNetV3Small_efficiency_WHC_InputAdaptive" eurosat mobilenet_v3_small "$EUROSAT_EPOCHS" 64 1 \
+  "$OUT_ROOT/part1_efficiency/eurosat/mobilenet_v3_small/whc_dt1d_input_adaptive/seed_${SEED}"
+
+python tools/aggregate_revision_results.py \
+  --root "$OUT_ROOT/part1_classification" \
+  --out_csv "$OUT_ROOT/part1_whc_dt1d_classification_summary.csv" || true
+python tools/aggregate_revision_results.py \
+  --root "$OUT_ROOT/part1_efficiency" \
+  --out_csv "$OUT_ROOT/part1_whc_dt1d_eurosat_efficiency_summary.csv" || true
+
+log "CELL 1 FINISHED. Outputs are in $OUT_ROOT"

@@ -387,6 +387,23 @@ def _extract_checkpoint_model(ckpt: dict, model_key: str):
     return ckpt
 
 
+def safe_torch_load(path, map_location="cpu"):
+    """Load a trusted PyTorch checkpoint across PyTorch versions.
+
+    PyTorch 2.6 changed the default behavior of torch.load to
+    weights_only=True. The checkpoints saved by this training script include
+    argparse.Namespace and sometimes NumPy scalar objects in `args`, so loading
+    them with the new default can fail with WeightsUnpickler errors.
+
+    Use this only for checkpoints you created or otherwise trust.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # Older PyTorch versions do not expose the weights_only argument.
+        return torch.load(path, map_location=map_location)
+
+
 class CLIPLinearProbe(nn.Module):
     def __init__(self, visual_module: nn.Module, feat_dim: int, num_classes: int, freeze_backbone: bool = True):
         super().__init__()
@@ -994,7 +1011,7 @@ def main(args):
 
     # Optional finetune checkpoint.
     if args.finetune:
-        checkpoint = torch.hub.load_state_dict_from_url(args.finetune, map_location="cpu", check_hash=True) if args.finetune.startswith("https") else torch.load(args.finetune, map_location="cpu")
+        checkpoint = torch.hub.load_state_dict_from_url(args.finetune, map_location="cpu", check_hash=True) if args.finetune.startswith("https") else safe_torch_load(args.finetune, map_location="cpu")
         checkpoint_model = _extract_checkpoint_model(checkpoint, args.model_key)
         state_dict = model.state_dict()
         for k in list(checkpoint_model.keys()):
@@ -1067,7 +1084,7 @@ def main(args):
     utils.auto_load_model(args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
 
     if args.head_from:
-        head_ckpt = torch.load(args.head_from, map_location="cpu")
+        head_ckpt = safe_torch_load(args.head_from, map_location="cpu")
         head_model = _extract_checkpoint_model(head_ckpt, args.model_key)
         model_sd = model_without_ddp.state_dict()
         to_load = {
@@ -1198,9 +1215,14 @@ def main(args):
     if data_loader_test is not None:
         best_ckpt = os.path.join(args.output_dir, "checkpoint-best.pth") if args.output_dir else ""
         if best_ckpt and os.path.exists(best_ckpt):
-            ckpt = torch.load(best_ckpt, map_location="cpu")
-            model_without_ddp.load_state_dict(ckpt["model"], strict=False)
-            print(f"[Info] Loaded best checkpoint for final test: {best_ckpt}")
+            try:
+                ckpt = safe_torch_load(best_ckpt, map_location="cpu")
+                state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+                model_without_ddp.load_state_dict(state, strict=False)
+                print(f"[Info] Loaded best checkpoint for final test: {best_ckpt}")
+            except Exception as e:
+                print(f"[Warn] Failed to reload best checkpoint ({best_ckpt}): {e}")
+                print("[Warn] Continuing final test with the current in-memory model.")
         test_stats = evaluate(data_loader_test, model, device, use_amp=args.use_amp, measure_latency=args.measure_eval_latency)
         print(f"Final test accuracy on {len(dataset_test)} images: {test_stats['acc1']:.3f}%")
         if args.output_dir:
