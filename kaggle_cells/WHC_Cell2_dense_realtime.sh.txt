@@ -1,0 +1,235 @@
+%%bash
+set -Eeuo pipefail
+
+REPO_URL="${REPO_URL:-https://github.com/tydeptrai21042004/1D-DT-ADAPTER.git}"
+WORKDIR="${WORKDIR:-/kaggle/working}"
+REPO_DIR="${REPO_DIR:-$WORKDIR/1D-DT-ADAPTER}"
+DATA_DIR="${DATA_DIR:-$WORKDIR/data}"
+OUT_ROOT="${OUT_ROOT:-$WORKDIR/dt1d_revision_outputs_whc}"
+DEVICE_REQUEST="${DEVICE:-cuda}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
+SEED="${SEED:-0}"
+FORCE="${FORCE:-0}"
+FAST_DEBUG="${FAST_DEBUG:-0}"
+MAX_WALL_MIN="${MAX_WALL_MIN:-680}"
+GUARD_MIN="${GUARD_MIN:-30}"
+SEG_EPOCHS="${SEG_EPOCHS:-30}"
+SEG_BATCH="${SEG_BATCH:-8}"
+DENSE_SIZE="${DENSE_SIZE:-224}"
+RUN_SEG="${RUN_SEG:-1}"
+RUN_REALTIME="${RUN_REALTIME:-1}"
+
+mkdir -p "$WORKDIR" "$DATA_DIR" "$OUT_ROOT"
+SCRIPT_START_TS="$(date +%s)"
+log(){ echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$OUT_ROOT/run.log"; }
+elapsed_min(){ echo $(( ($(date +%s) - SCRIPT_START_TS) / 60 )); }
+remaining_min(){ echo $(( MAX_WALL_MIN - $(elapsed_min) )); }
+can_start(){ local r; r="$(remaining_min)"; if (( r <= GUARD_MIN )); then log "Time guard reached. Remaining=${r} min."; return 1; fi; return 0; }
+run_cmd(){
+  local name="$1"; shift; local out="$1"; shift; mkdir -p "$out"
+  if [[ "$FORCE" != "1" && ( -f "$out/test_summary.json" || -f "$out/summary.json" ) ]]; then
+    log "SKIP $name"; echo -e "$name\tSKIP\t0\t$out" >> "$OUT_ROOT/status.tsv"; return 0
+  fi
+  can_start || return 0
+  log "START $name"; set +e; "$@" 2>&1 | tee "$out/stdout.log"; local code=${PIPESTATUS[0]}; set -e
+  if [[ $code -ne 0 ]]; then log "FAILED $name with code $code"; echo -e "$name\tFAILED\t$code\t$out" >> "$OUT_ROOT/status.tsv"; return 0; fi
+  log "DONE $name"; echo -e "$name\tDONE\t0\t$out" >> "$OUT_ROOT/status.tsv"
+}
+
+log "Installing dependencies"
+python -m pip install -q --upgrade pip
+python -m pip install -q timm pandas thop fvcore torchmetrics pycocotools opencv-python-headless pytest
+
+if [[ ! -d "$REPO_DIR/.git" ]]; then git clone "$REPO_URL" "$REPO_DIR"; else git -C "$REPO_DIR" pull --ff-only || true; fi
+cd "$REPO_DIR"
+git rev-parse HEAD | tee "$OUT_ROOT/git_commit.txt"
+mkdir -p revision_tools
+if [[ ! -f "$OUT_ROOT/status.tsv" ]]; then echo -e "name\tstatus\tcode\tout_dir" > "$OUT_ROOT/status.tsv"; fi
+
+read DEVICE USE_AMP PROFILE_EFF MEASURE_LAT PIN_MEM < <(python - <<'PY'
+import os, sys
+req=os.environ.get('DEVICE', os.environ.get('DEVICE_REQUEST','cuda')).lower()
+device,use_amp,profile_eff,measure_lat,pin_mem='cpu','False','False','False','False'
+try:
+ import torch
+ if req.startswith('cuda') and torch.cuda.is_available():
+  cap=torch.cuda.get_device_capability(0); name=torch.cuda.get_device_name(0)
+  print(f"[DeviceCheck] Found CUDA GPU: {name}, capability={cap}", file=sys.stderr)
+  if cap[0] >= 7: device,use_amp,profile_eff,measure_lat,pin_mem='cuda','True','True','True','True'
+  else: print('[DeviceCheck] capability < 7.0; falling back to CPU', file=sys.stderr)
+except Exception as e: print(f'[DeviceCheck] Failed: {e}; using CPU', file=sys.stderr)
+print(device,use_amp,profile_eff,measure_lat,pin_mem)
+PY
+)
+log "Resolved device=$DEVICE"
+if [[ "$DEVICE" == "cpu" ]]; then NUM_WORKERS="${CPU_NUM_WORKERS:-2}"; if [[ "${CPU_FORCE_FAST_DEBUG:-0}" == "1" ]]; then FAST_DEBUG=1; fi; fi
+
+run_cmd "PREFLIGHT_WHC_DT1D" "$OUT_ROOT/preflight" env PYTHONPATH="$REPO_DIR" python tools/preflight_whc_dt1d.py --device "$DEVICE"
+
+python main.py --help > "$OUT_ROOT/main_help.txt" || true
+EXTRA_GATE_ARGS=()
+grep -q -- "--dt_input_adaptive_gate" "$OUT_ROOT/main_help.txt" && EXTRA_GATE_ARGS+=(--dt_input_adaptive_gate True)
+grep -q -- "--dt_gate_reduction" "$OUT_ROOT/main_help.txt" && EXTRA_GATE_ARGS+=(--dt_gate_reduction 4)
+
+DT_ARGS=(--tuning_method dt --dt_M 1 --dt_h 1 --dt_dilations 1,2,4 --dt_scale_adaptive True --dt_separate_axis_kernels True --dt_gate_temperature 1.0 --dt_axis hw --dt_alpha_group 16 --dt_pw_ratio 32 --dt_pw_groups 4 --dt_gate_init 0.01 --dt_padding reflect --adapt_scale 1.0 "${EXTRA_GATE_ARGS[@]}")
+COMMON_ARGS=(--data_path "$DATA_DIR" --device "$DEVICE" --weights DEFAULT --input_size 224 --imagenet_norm True --imagenet_default_mean_and_std True --freeze_backbone True --final_test True --save_history True --profile_efficiency "$PROFILE_EFF" --profile_batch_size 16 --measure_eval_latency "$MEASURE_LAT" --dist_eval False --enable_wandb False --num_workers "$NUM_WORKERS" --use_amp "$USE_AMP" --pin_mem "$PIN_MEM")
+
+run_cls(){
+  local name="$1" dataset="$2" backbone="$3" epochs="$4" batch="$5" update_freq="$6" out="$7"
+  if [[ "$FAST_DEBUG" == "1" ]]; then epochs=1; batch=$(( batch > 8 ? 8 : batch )); update_freq=1; fi
+  if [[ "$DEVICE" == "cpu" ]]; then batch=$(( batch > 8 ? 8 : batch )); update_freq=1; fi
+  run_cmd "$name" "$out" env PYTHONPATH="$REPO_DIR" python main.py --dataset "$dataset" --backbone "$backbone" --epochs "$epochs" --batch_size "$batch" --update_freq "$update_freq" --seed "$SEED" --output_dir "$out" "${COMMON_ARGS[@]}" "${DT_ARGS[@]}"
+}
+
+run_cls "P2_Flowers102_ResNet18_10ep_bs64_WHC_InputAdaptive" flowers102 resnet18 10 64 1 "$OUT_ROOT/part2_classification/flowers102/resnet18_10ep_bs64/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P2_Flowers102_ResNet18_100ep_bs64_WHC_InputAdaptive" flowers102 resnet18 100 64 1 "$OUT_ROOT/part2_classification/flowers102/resnet18_100ep_bs64/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P2_Flowers102_ResNet18_100ep_bs32_WHC_InputAdaptive" flowers102 resnet18 100 32 1 "$OUT_ROOT/part2_classification/flowers102/resnet18_100ep_bs32/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P2_Food101_EfficientNetB0_10ep_WHC_InputAdaptive" food101 efficientnet_b0 10 32 2 "$OUT_ROOT/part2_classification/food101/efficientnet_b0/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P2_Pet_EfficientNetB0_10ep_WHC_InputAdaptive" oxfordiiitpet efficientnet_b0 10 64 1 "$OUT_ROOT/part2_classification/oxfordiiitpet/efficientnet_b0_10ep/whc_dt1d_input_adaptive/seed_${SEED}"
+run_cls "P2_Pet_EfficientNetB0_100ep_WHC_InputAdaptive" oxfordiiitpet efficientnet_b0 100 64 1 "$OUT_ROOT/part2_classification/oxfordiiitpet/efficientnet_b0_100ep/whc_dt1d_input_adaptive/seed_${SEED}"
+
+cat > revision_tools/run_seg_whc_dt1d_pet_compact.py <<'PY'
+import argparse,json,random,time,sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from torch.utils.data import DataLoader
+import torchvision.transforms as T
+from torchvision.datasets import OxfordIIITPet
+from torchvision.transforms import InterpolationMode
+from models.hcc_adapter import HCCAdapter
+
+def seed_all(s): random.seed(s); np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
+class PetSeg(torch.utils.data.Dataset):
+    def __init__(self,root,split,size):
+        self.ds=OxfordIIITPet(root=root,split=split,target_types='segmentation',download=True)
+        self.it=T.Compose([T.Resize((size,size),InterpolationMode.BICUBIC),T.ToTensor(),T.Normalize((0.485,0.456,0.406),(0.229,0.224,0.225))])
+        self.mt=T.Resize((size,size),InterpolationMode.NEAREST)
+    def __len__(self): return len(self.ds)
+    def __getitem__(self,i):
+        x,m=self.ds[i]; m=torch.as_tensor(np.array(self.mt(m)),dtype=torch.long); return self.it(x), torch.clamp(m-1,0,2)
+def make_adapter(ch): return HCCAdapter(C=ch,M=1,h=1,dilations='1,2,4',scale_adaptive=True,separate_axis_kernels=True,gate_temperature=1.0,axis='hw',alpha_group=16,no_pw=False,pw_ratio=32,pw_groups=4,gate_init=0.01,padding_mode='reflect',input_adaptive_gate=True,gate_reduction=4)
+def build_model():
+    import torchvision
+    try:
+        from torchvision.models.segmentation import DeepLabV3_MobileNet_V3_Large_Weights
+        m=torchvision.models.segmentation.deeplabv3_mobilenet_v3_large(weights=DeepLabV3_MobileNet_V3_Large_Weights.DEFAULT)
+    except Exception: m=torchvision.models.segmentation.deeplabv3_mobilenet_v3_large(pretrained=True)
+    m.classifier[-1]=nn.Conv2d(m.classifier[-1].in_channels,3,1)
+    if getattr(m,'aux_classifier',None) is not None: m.aux_classifier[-1]=nn.Conv2d(m.aux_classifier[-1].in_channels,3,1)
+    return m
+def attach_dt1d(m):
+    from torchvision.models.mobilenetv3 import InvertedResidual
+    n=0
+    for mod in list(m.modules()):
+        if isinstance(mod,InvertedResidual) and not hasattr(mod,'dt1d'):
+            last=None
+            for c in mod.modules():
+                if isinstance(c,nn.Conv2d): last=c
+            if last is None: continue
+            mod.add_module('dt1d',make_adapter(last.out_channels)); mod.register_forward_hook(lambda mm,inp,out: mm.dt1d(out)); n+=1
+    print('attached_seg_whc_dt1d',n)
+def set_trainable(m):
+    for p in m.parameters(): p.requires_grad=False
+    for name,p in m.named_parameters():
+        if 'dt1d' in name or name.startswith('classifier') or name.startswith('aux_classifier'): p.requires_grad=True
+    return sum(p.numel() for p in m.parameters() if p.requires_grad), sum(p.numel() for p in m.parameters())
+def metrics(conf):
+    conf=conf.astype(float); tp=np.diag(conf); iou=tp/np.maximum(conf.sum(1)+conf.sum(0)-tp,1); dice=2*tp/np.maximum(conf.sum(1)+conf.sum(0),1); acc=tp/np.maximum(conf.sum(1),1)
+    return dict(mIoU_percent=float(iou.mean()*100),dice_percent=float(dice.mean()*100),pixel_acc_percent=float(tp.sum()/max(conf.sum(),1)*100),mean_acc_percent=float(acc.mean()*100))
+@torch.no_grad()
+def eval_model(m,loader,dev):
+    m.eval(); conf=np.zeros((3,3),dtype=np.int64)
+    for x,y in loader:
+        x=x.to(dev); y=y.to(dev); p=m(x)['out'].argmax(1); k=(y>=0)&(y<3); conf+=np.bincount((3*y[k]+p[k]).cpu().numpy(),minlength=9).reshape(3,3)
+    return metrics(conf)
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('--data-root',default='/kaggle/working/data'); ap.add_argument('--out-dir',required=True); ap.add_argument('--epochs',type=int,default=30); ap.add_argument('--batch-size',type=int,default=8); ap.add_argument('--size',type=int,default=224); ap.add_argument('--seed',type=int,default=0); ap.add_argument('--device',default='cuda'); ap.add_argument('--num-workers',type=int,default=2); a=ap.parse_args()
+    seed_all(a.seed); out=Path(a.out_dir); out.mkdir(parents=True,exist_ok=True); dev=torch.device(a.device if torch.cuda.is_available() and a.device.startswith('cuda') else 'cpu')
+    if dev.type=='cpu': a.batch_size=min(a.batch_size,4)
+    tr=DataLoader(PetSeg(a.data_root,'trainval',a.size),batch_size=a.batch_size,shuffle=True,num_workers=a.num_workers,pin_memory=(dev.type=='cuda'))
+    va=DataLoader(PetSeg(a.data_root,'test',a.size),batch_size=a.batch_size,shuffle=False,num_workers=a.num_workers,pin_memory=(dev.type=='cuda'))
+    m=build_model(); attach_dt1d(m); trn,tot=set_trainable(m); m.to(dev); opt=torch.optim.AdamW([p for p in m.parameters() if p.requires_grad],lr=3e-4,weight_decay=0.01)
+    hist=[]; best=-1; be=-1; start=time.time(); peak=0
+    for e in range(a.epochs):
+        m.train(); ls=0; n=0; t0=time.time();
+        if dev.type=='cuda': torch.cuda.reset_peak_memory_stats(dev)
+        for x,y in tr:
+            x=x.to(dev); y=y.to(dev); opt.zero_grad(set_to_none=True); o=m(x); loss=F.cross_entropy(o['out'],y); loss=loss+(0.4*F.cross_entropy(o['aux'],y) if 'aux' in o else 0); loss.backward(); opt.step(); ls+=float(loss.detach().cpu())*x.size(0); n+=x.size(0)
+        if dev.type=='cuda': peak=max(peak,torch.cuda.max_memory_allocated(dev)/(1024**2))
+        ev=eval_model(m,va,dev); row={'epoch':e,'train_loss':ls/max(n,1),'epoch_time_sec':time.time()-t0,**{f'val_{k}':v for k,v in ev.items()}}; hist.append(row); print(json.dumps(row),flush=True)
+        if ev['mIoU_percent']>best: best=ev['mIoU_percent']; be=e; torch.save(m.state_dict(),out/'best.pth')
+    m.load_state_dict(torch.load(out/'best.pth',map_location=dev,weights_only=False),strict=False); test=eval_model(m,va,dev)
+    result={'task':'semantic_segmentation','dataset':'Oxford-IIIT Pet','model':'DeepLabV3-MobileNetV3','method':'WHC-DT1D-Adapter input-adaptive','epochs':a.epochs,'best_epoch':be,'trainable_params':trn,'total_params':tot,'trainable_percent':100*trn/tot,'storage_per_task_MB':trn*4/(1024**2),'peak_train_memory_mb':peak,'total_train_time_sec':time.time()-start,'mean_epoch_time_sec':float(np.mean([h['epoch_time_sec'] for h in hist])),**{f'test_{k}':v for k,v in test.items()}}
+    (out/'history.json').write_text(json.dumps(hist,indent=2)); (out/'summary.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result,indent=2))
+if __name__=='__main__': main()
+PY
+
+cat > revision_tools/run_realtime_whc_dt1d_compact.py <<'PY'
+import argparse,json,random,time,sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import numpy as np, torch, torch.nn as nn, torchvision
+from models.hcc_adapter import HCCAdapter
+
+def make_adapter(ch): return HCCAdapter(C=ch,M=1,h=1,dilations='1,2,4',scale_adaptive=True,separate_axis_kernels=True,gate_temperature=1.0,axis='hw',alpha_group=16,no_pw=False,pw_ratio=32,pw_groups=4,gate_init=0.01,padding_mode='reflect',input_adaptive_gate=True,gate_reduction=4)
+def attach(m):
+    from torchvision.models.resnet import BasicBlock,Bottleneck
+    for mod in list(m.modules()):
+        ch=None
+        if isinstance(mod,BasicBlock): ch=mod.conv2.out_channels
+        elif isinstance(mod,Bottleneck): ch=mod.conv3.out_channels
+        if ch and not hasattr(mod,'dt1d'):
+            mod.add_module('dt1d',make_adapter(ch)); mod.register_forward_hook(lambda mm,inp,out: mm.dt1d(out))
+def build(kind):
+    try:
+        from torchvision.models import ResNet18_Weights
+        m=torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
+    except Exception: m=torchvision.models.resnet18(pretrained=True)
+    m.fc=nn.Linear(m.fc.in_features,37)
+    if kind=='dt1d': attach(m)
+    return m.eval()
+@torch.no_grad()
+def bench(m,dev,n,size,e2e=False):
+    mean=torch.tensor([0.485,0.456,0.406]).view(1,3,1,1); std=torch.tensor([0.229,0.224,0.225]).view(1,3,1,1); times=[]
+    if dev.type=='cuda': torch.cuda.reset_peak_memory_stats(dev)
+    for _ in range(10 if dev.type=='cuda' else 2):
+        x=torch.rand(1,3,size,size); x=((x-mean)/std).to(dev) if e2e else x.to(dev); m(x)
+    if dev.type=='cuda': torch.cuda.synchronize()
+    for _ in range(n):
+        t=time.time(); x=torch.rand(1,3,size,size); x=((x-mean)/std).to(dev) if e2e else x.to(dev); m(x)
+        if dev.type=='cuda': torch.cuda.synchronize()
+        times.append((time.time()-t)*1000)
+    return {'mean_ms':float(np.mean(times)),'std_ms':float(np.std(times)),'FPS':float(1000/np.mean(times)),'peak_infer_memory_mb':float(torch.cuda.max_memory_allocated(dev)/(1024**2)) if dev.type=='cuda' else None}
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('--out-dir',required=True); ap.add_argument('--device',default='cuda'); ap.add_argument('--frames',type=int,default=300); ap.add_argument('--size',type=int,default=224); ap.add_argument('--seed',type=int,default=0); a=ap.parse_args(); random.seed(a.seed); np.random.seed(a.seed); torch.manual_seed(a.seed); out=Path(a.out_dir); out.mkdir(parents=True,exist_ok=True); dev=torch.device(a.device if torch.cuda.is_available() and a.device.startswith('cuda') else 'cpu'); frames=a.frames if dev.type=='cuda' else min(a.frames,30)
+    base=build('base').to(dev); dt1d=build('dt1d').to(dev)
+    result={'benchmark':'synthetic-video-latency','backbone':'ResNet-18','method':'WHC-DT1D-Adapter input-adaptive','device':str(dev),'frames':frames,'baseline_model_only':bench(base,dev,frames,a.size,False),'dt1d_model_only':bench(dt1d,dev,frames,a.size,False),'baseline_end_to_end':bench(base,dev,frames,a.size,True),'dt1d_end_to_end':bench(dt1d,dev,frames,a.size,True)}; (out/'summary.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result,indent=2))
+if __name__=='__main__': main()
+PY
+
+if [[ "$FAST_DEBUG" == "1" ]]; then SEG_EPOCHS=1; fi
+if [[ "$DEVICE" == "cpu" ]]; then SEG_BATCH=$(( SEG_BATCH > 4 ? 4 : SEG_BATCH )); fi
+if [[ "$RUN_SEG" == "1" ]]; then
+  run_cmd "P2_Seg_Pet_DeepLabV3_MobileNetV3_WHC_InputAdaptive" "$OUT_ROOT/part2_dense/segmentation/oxfordiiitpet/deeplabv3_mobilenetv3/whc_dt1d_input_adaptive/seed_${SEED}" \
+    env PYTHONPATH="$REPO_DIR" python revision_tools/run_seg_whc_dt1d_pet_compact.py --data-root "$DATA_DIR" --out-dir "$OUT_ROOT/part2_dense/segmentation/oxfordiiitpet/deeplabv3_mobilenetv3/whc_dt1d_input_adaptive/seed_${SEED}" --epochs "$SEG_EPOCHS" --batch-size "$SEG_BATCH" --size "$DENSE_SIZE" --seed "$SEED" --num-workers "$NUM_WORKERS" --device "$DEVICE"
+fi
+if [[ "$RUN_REALTIME" == "1" ]]; then
+  FRAMES="${REALTIME_FRAMES:-300}"; if [[ "$FAST_DEBUG" == "1" ]]; then FRAMES=10; fi
+  run_cmd "P2_Realtime_ResNet18_baseline_vs_WHC_InputAdaptive" "$OUT_ROOT/part2_realtime/resnet18_whc_dt1d_input_adaptive/seed_${SEED}" \
+    env PYTHONPATH="$REPO_DIR" python revision_tools/run_realtime_whc_dt1d_compact.py --out-dir "$OUT_ROOT/part2_realtime/resnet18_whc_dt1d_input_adaptive/seed_${SEED}" --device "$DEVICE" --frames "$FRAMES" --size 224 --seed "$SEED"
+fi
+python tools/aggregate_revision_results.py --root "$OUT_ROOT/part2_classification" --out_csv "$OUT_ROOT/part2_whc_dt1d_classification_summary.csv" || true
+python - <<PY
+import glob,json
+from pathlib import Path
+import pandas as pd
+root=Path('$OUT_ROOT'); rows=[]
+for p in glob.glob(str(root/'**'/'summary.json'),recursive=True):
+    try:
+        d=json.load(open(p)); d['summary_path']=p; rows.append(d)
+    except Exception as e: rows.append({'summary_path':p,'error':str(e)})
+if rows:
+    out=root/'part2_dense_realtime_summary.csv'; pd.json_normalize(rows).to_csv(out,index=False); print('Saved',out)
+PY
+log "CELL 2 FINISHED. Outputs are in $OUT_ROOT"
