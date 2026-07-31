@@ -1,0 +1,7 @@
+{
+  "main.py": "31d794d5b3c6d2ae7b395c5ef917f24594ac97181c19961c7c4b028ed71b48ab",
+  "models/hcc_adapter.py": "a9b560e1ccdd1e39843d7ae275e6dae8a366803c81d1546c47f3f91aaf9b4e27",
+  "FINAL_VERIFICATION_REPORT.md": "f2dab3b654e4de2f2da88c2581d7890d10e3e9fc7856898d8886f7bb67eb46aa",
+  "final_independent_metric_audit.json": "e3f3442aa53c361d087e5f09b2bebfa9a98ffca621e9f0fa342723cf067c72c7",
+  "final_paired_timing_audit.json": "1418b1d1dd814d0556eaf43042c5176ec9240a8b39fc1fb5017e659575798993"
+}

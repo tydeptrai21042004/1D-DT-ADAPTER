@@ -1,0 +1,39 @@
+{
+  "broader_config_cases": 240,
+  "maxima": {
+    "output_abs": 4.76837158203125e-07,
+    "loss_abs": 4.76837158203125e-07,
+    "input_grad_abs": 5.960464477539063e-08,
+    "parameter_grad_abs": 1.1920928955078125e-07,
+    "running_stat_abs": 4.656612873077393e-10
+  },
+  "minimum_prediction_agreement": 1.0,
+  "failures": [],
+  "cost_violation_count": 0,
+  "cost_violations": [],
+  "state_keys_equal": true,
+  "param_count_equal": true,
+  "buffer_count_equal": true,
+  "checkpoint_storage_bytes": {
+    "old": 7928,
+    "new": 7928,
+    "equal": true
+  },
+  "long_training_trajectory": {
+    "steps": 300,
+    "max_loss_abs": 2.384185791015625e-07,
+    "max_logit_abs": 5.960464477539063e-08,
+    "min_top1_agreement": 1.0,
+    "max_param_abs": 1.1920928955078125e-07,
+    "max_bn_buffer_abs": 5.960464477539063e-08,
+    "optimizer_step_equal": true,
+    "max_optimizer_state_abs": 4.190951585769653e-09
+  },
+  "cpu_autocast_bfloat16": {
+    "supported": true,
+    "max_output_abs": 0.000732421875,
+    "top1_proxy_agreement": 1.0,
+    "dtype": "torch.float32"
+  },
+  "torch_version": "2.10.0+cpu"
+}

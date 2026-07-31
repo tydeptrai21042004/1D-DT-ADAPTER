@@ -1,0 +1,41 @@
+{
+  "changed_existing_source_files": [
+    "main.py",
+    "models/hcc_adapter.py"
+  ],
+  "added_files": [
+    "CHANGE_SCOPE_MANIFEST.json",
+    "DT1D_MATH_REALIZATION.patch",
+    "MANUSCRIPT_MATH_REALIZATION.tex",
+    "MATH_FIRST_BEFORE_AFTER_AUDIT.md",
+    "benchmark_dt1d_math_realization.json",
+    "benchmark_dt1d_math_resnet18_cpu.json",
+    "tests/test_dt1d_math_realization.py",
+    "tools/benchmark_dt1d_math_realization.py",
+    "tools/benchmark_dt1d_math_resnet18_cpu.py",
+    "tools/validate_dt1d_math_realization.py",
+    "validation_dt1d_math_realization.json",
+    "FINAL_VERIFICATION_REPORT.md",
+    "final_independent_metric_audit.json",
+    "final_paired_timing_audit.json",
+    "final_profiler_flops_memory.json",
+    "final_resnet_profiler_flops_memory.json",
+    "tools/final_paired_benchmark.py"
+  ],
+  "removed_files": [],
+  "unchanged_existing_file_count": 50,
+  "baseline_files_changed": [],
+  "dataset_files_changed": [],
+  "training_engine_files_changed": [],
+  "final_verification": {
+    "focused_tests_passed": 226,
+    "exhaustive_configs": 720,
+    "additional_independent_configs": 240,
+    "source_files_changed": [
+      "main.py",
+      "models/hcc_adapter.py"
+    ],
+    "baseline_files_changed": 0,
+    "dataset_files_changed": 0
+  }
+}

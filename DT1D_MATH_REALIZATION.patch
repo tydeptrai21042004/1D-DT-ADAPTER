@@ -1,0 +1,232 @@
+--- /mnt/data/dt1d_repo/1D-DT-ADAPTER-main/models/hcc_adapter.py	2026-05-20 18:36:02.000000000 +0000
++++ /mnt/data/dt1d_repo_math_realization_v3/models/hcc_adapter.py	2026-07-31 14:58:45.971500743 +0000
+@@ -88,6 +88,7 @@
+         scale_adaptive: bool = False,
+         separate_axis_kernels: bool = True,
+         gate_temperature: float = 1.0,
++        exact_cost_realization: bool = True,
+         input_adaptive_gate: bool = False,  # deprecated/ignored; kept for CLI compatibility
+         gate_reduction: int = 4,            # deprecated/ignored; kept for CLI compatibility
+         **legacy,
+@@ -135,6 +136,10 @@
+         # For backward compatibility, single-dilation non-adaptive mode shares the old kernel.
+         self.separate_axis_kernels = bool(separate_axis_kernels and self.scale_adaptive)
+         self.gate_temperature = float(gate_temperature)
++        # Exact mathematical realization selector. This changes neither the learned
++        # parameters nor the represented DT1D operator. It only selects the globally
++        # minimum-cost exact partition of static axis--scale branches.
++        self.exact_cost_realization = bool(exact_cost_realization)
+         # The GAP-MLP input-adaptive router has been removed. Keep these attributes
+         # only so older scripts/checkpoints that inspect them do not fail.
+         self.input_adaptive_gate = False
+@@ -201,6 +206,7 @@
+         return (
+             f"C={self.C}, M={self.M}, dilations={self.dilations}, axis={self.axis}, "
+             f"scale_adaptive={self.scale_adaptive}, static_axis_scale_gate=True, "
++            f"exact_cost_realization={self.exact_cost_realization}, "
+             f"separate_axis_kernels={self.separate_axis_kernels}, "
+             f"alpha_group={self.alpha_group}, G={self.num_alpha_groups}, "
+             f"no_pw={self.no_pw}, gate={float(self.gate.detach().cpu()):.4g}"
+@@ -322,6 +328,131 @@
+         wg = wg / denom
+         return self._expand_group_kernel_to_channels(wg)
+ 
++
++    def _build_exact_group_kernel_1d(
++        self,
++        axis_idx: int,
++        scale_indices: Sequence[int],
++        axis_scale_weights: torch.Tensor,
++        device: torch.device,
++        dtype: torch.dtype,
++    ) -> torch.Tensor:
++        """Build one exact Laurent-polynomial realization of a scale group.
++
++        For a fixed axis u and a group G of dilation scales, the original branch sum
++
++            sum_{s in G} pi[u,s] T_{d_s,k_{u,s}} x
++
++        equals one unit-dilation convolution with kernel K_{u,G} satisfying
++
++            K_{u,G}[t] = sum_{s in G} sum_r
++                         pi[u,s] k_{u,s}[r] 1_{t=d_s r}.
++
++        No coefficient, routing weight, normalization, boundary rule, or residual
++        operation is changed.
++        """
++        group = tuple(int(i) for i in scale_indices)
++        if not group:
++            raise ValueError("scale_indices must be non-empty")
++        radius = self.M + 1
++        max_offset = radius * max(int(self.dilations[i]) for i in group)
++        fused = torch.zeros(self.C, 2 * max_offset + 1, device=device, dtype=dtype)
++        base_offsets = torch.arange(-radius, radius + 1, device=device, dtype=torch.long)
++        for scale_idx in group:
++            dilation = int(self.dilations[scale_idx])
++            kernel = self._build_weighted_hcc_kernel_1d(
++                axis_idx, scale_idx, device, dtype
++            ).squeeze(1)
++            positions = max_offset + dilation * base_offsets
++            fused = fused.index_add(
++                1,
++                positions,
++                axis_scale_weights[axis_idx, scale_idx] * kernel,
++            )
++        return fused.unsqueeze(1)
++
++    def _group_dense_cost(self, scale_indices: Sequence[int]) -> int:
++        """Dense tap count of an exact realization group."""
++        group = tuple(int(i) for i in scale_indices)
++        if len(group) == 1:
++            return 2 * self.M + 3
++        return 2 * (self.M + 1) * max(int(self.dilations[i]) for i in group) + 1
++
++    def _optimal_exact_partition(
++        self, scale_indices: Sequence[int]
++    ) -> Tuple[Tuple[int, ...], ...]:
++        """Globally minimize exact dense taps, then convolution launches.
++
++        The admissible family contains the original all-singleton realization. Hence
++        the optimum can never have more dense taps or more launches at equal tap cost
++        than the original branch algorithm. The recurrence is
++
++            J(i) = min_{0 <= j < i} J(j) + c({j,...,i-1}),
++
++        after sorting scales by dilation. Because group cost depends only on its
++        maximum dilation and singleton status, an optimal partition has a contiguous
++        representative in this order.
++        """
++        ordered = tuple(sorted((int(i) for i in scale_indices), key=lambda i: self.dilations[i]))
++        n = len(ordered)
++        if n == 0:
++            return tuple()
++        # dp[i] = (tap_cost, launches, partition) for ordered[:i].
++        dp = [(0, 0, tuple())] + [None] * n
++        for i in range(1, n + 1):
++            best = None
++            for j in range(i):
++                group = ordered[j:i]
++                prev_cost, prev_launches, prev_partition = dp[j]
++                candidate = (
++                    prev_cost + self._group_dense_cost(group),
++                    prev_launches + 1,
++                    prev_partition + (group,),
++                )
++                if best is None or candidate[:2] < best[:2]:
++                    best = candidate
++            dp[i] = best
++        return dp[n][2]
++
++    def _exact_partition_for_axis(
++        self, x: torch.Tensor, axis_name: str
++    ) -> Tuple[Tuple[int, ...], ...]:
++        """Return a boundary-equivalent exact partition for one axis.
++
++        Under reflect padding, the uploaded implementation switches an individual
++        branch to replicate padding when its required pad is not smaller than the
++        spatial dimension. Branches with different boundary operators cannot be fused
++        exactly, so they are optimized in separate equivalence classes.
++        """
++        scales = tuple(range(self.num_scales))
++        if self.padding_mode != "reflect":
++            classes = (scales,)
++        else:
++            spatial = int(x.shape[-2] if axis_name == "h" else x.shape[-1])
++            radius = self.M + 1
++            reflect_scales = tuple(
++                i for i in scales if radius * int(self.dilations[i]) < spatial
++            )
++            replicate_scales = tuple(
++                i for i in scales if radius * int(self.dilations[i]) >= spatial
++            )
++            classes = tuple(g for g in (reflect_scales, replicate_scales) if g)
++        result = []
++        for equivalence_class in classes:
++            result.extend(self._optimal_exact_partition(equivalence_class))
++        return tuple(result)
++
++    def exact_realization_cost(self, x: torch.Tensor, axis_name: str) -> Dict[str, int]:
++        """Report per-axis mathematical cost before and after optimization."""
++        base = 2 * self.M + 3
++        partition = self._exact_partition_for_axis(x, axis_name)
++        return {
++            "before_calls": int(self.num_scales),
++            "after_calls": int(len(partition)),
++            "before_dense_taps": int(self.num_scales * base),
++            "after_dense_taps": int(sum(self._group_dense_cost(g) for g in partition)),
++        }
++
+     def _pad(self, x: torch.Tensor, pad_h: int, pad_w: int) -> torch.Tensor:
+         if pad_h == 0 and pad_w == 0:
+             return x
+@@ -362,10 +493,31 @@
+             weights = self._compute_axis_scale_weights(x.device, x.dtype)  # (A, S)
+             y = torch.zeros_like(x)
+             for ai, axis_name in enumerate(self.axis_names):
+-                for si, dilation in enumerate(self.dilations):
+-                    w1d = self._build_weighted_hcc_kernel_1d(ai, si, x.device, x.dtype)
+-                    yi = self._conv_axis(x, axis_name, w1d, dilation)
+-                    y = y + weights[ai, si] * yi
++                if self.exact_cost_realization:
++                    partition = self._exact_partition_for_axis(x, axis_name)
++                    for group in partition:
++                        if len(group) == 1:
++                            si = group[0]
++                            w1d = self._build_weighted_hcc_kernel_1d(
++                                ai, si, x.device, x.dtype
++                            )
++                            yi = self._conv_axis(
++                                x, axis_name, w1d, int(self.dilations[si])
++                            )
++                            y = y + weights[ai, si] * yi
++                        else:
++                            w1d = self._build_exact_group_kernel_1d(
++                                ai, group, weights, x.device, x.dtype
++                            )
++                            y = y + self._conv_axis(x, axis_name, w1d, dilation=1)
++                else:
++                    # Uploaded branch realization retained as a fair ablation.
++                    for si, dilation in enumerate(self.dilations):
++                        w1d = self._build_weighted_hcc_kernel_1d(
++                            ai, si, x.device, x.dtype
++                        )
++                        yi = self._conv_axis(x, axis_name, w1d, dilation)
++                        y = y + weights[ai, si] * yi
+         else:
+             # Single-dilation path: average selected weighted-HCC axial responses to
+             # preserve the response scale when both axes are enabled.
+--- /mnt/data/dt1d_repo/1D-DT-ADAPTER-main/main.py	2026-05-20 18:36:02.000000000 +0000
++++ /mnt/data/dt1d_repo_math_realization_v3/main.py	2026-07-31 15:08:28.095480348 +0000
+@@ -101,6 +101,7 @@
+     parser.add_argument("--hcc_scale_adaptive", type=str2bool, default=False, help="Enable learnable axis--scale gates for DT1D.")
+     parser.add_argument("--hcc_separate_axis_kernels", type=str2bool, default=True, help="Use separate group-shared kernels for each axis and dilation when scale-adaptive DT1D is enabled.")
+     parser.add_argument("--hcc_gate_temperature", type=float, default=1.0, help="Softmax temperature for DT1D axis--scale gates.")
++    parser.add_argument("--hcc_exact_cost_realization", type=str2bool, default=True, help="Use the exact minimum-cost Laurent realization of static axis--scale DT1D branches. Set false only for the branch-form ablation.")
+     parser.add_argument("--hcc_input_adaptive_gate", type=str2bool, default=False, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
+     parser.add_argument("--hcc_gate_reduction", type=int, default=4, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
+     parser.add_argument("--hcc_M", type=int, default=1)
+@@ -120,6 +121,7 @@
+     parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable axis--scale gates for DT1D.")
+     parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None, help="Use separate group-shared kernels for each axis and dilation.")
+     parser.add_argument("--dt_gate_temperature", type=float, default=None, help="Softmax temperature for DT1D axis--scale gates.")
++    parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None, help="Official alias for --hcc_exact_cost_realization.")
+     parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
+     parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
+     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
+@@ -295,6 +297,8 @@
+         args.hcc_separate_axis_kernels = args.dt_separate_axis_kernels
+     if args.dt_gate_temperature is not None:
+         args.hcc_gate_temperature = args.dt_gate_temperature
++    if args.dt_exact_cost_realization is not None:
++        args.hcc_exact_cost_realization = args.dt_exact_cost_realization
+     if args.dt_input_adaptive_gate is not None:
+         args.hcc_input_adaptive_gate = args.dt_input_adaptive_gate
+     if args.dt_gate_reduction is not None:
+@@ -614,6 +618,7 @@
+                 scale_adaptive=args.hcc_scale_adaptive,
+                 separate_axis_kernels=args.hcc_separate_axis_kernels,
+                 gate_temperature=args.hcc_gate_temperature,
++                exact_cost_realization=args.hcc_exact_cost_realization,
+                 input_adaptive_gate=args.hcc_input_adaptive_gate,
+                 gate_reduction=args.hcc_gate_reduction,
+                 axis=args.hcc_axis,

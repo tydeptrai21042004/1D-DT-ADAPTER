@@ -1,0 +1,104 @@
+\subsection{Exact minimum-cost realization of the static axis--scale operator}
+
+The reduction in trainable parameters does not by itself guarantee low execution
+latency, because the branch-form implementation evaluates one depthwise axial
+convolution for every enabled axis--scale pair. We therefore derive an exact
+minimum-cost realization of the same learned DT1D operator, without changing its
+parameters, training objective, routing rule, or hypothesis class.
+
+For axis $u$, dilation $d_s$, and normalized shifted kernel
+$\widetilde{k}_{u,s}$, define
+\begin{equation}
+(\mathcal{T}_{u,d_s,\widetilde{k}_{u,s}}x)[n]
+=
+\sum_{r=-R}^{R}\widetilde{k}_{u,s}[r]
+ x[n+d_s r e_u],
+\qquad R=M+1.
+\end{equation}
+The original static-router realization is
+\begin{equation}
+\mathcal{F}_{\mathrm{branch}}x
+=
+\sum_{u\in\mathcal{A}}\sum_{s=1}^{S}
+\pi_{u,s}\mathcal{T}_{u,d_s,\widetilde{k}_{u,s}}x.
+\end{equation}
+For a boundary-compatible scale group $G$, define the aggregated Laurent kernel
+\begin{equation}
+K_{u,G}[t]
+=
+\sum_{s\in G}\sum_{r=-R}^{R}
+\pi_{u,s}\widetilde{k}_{u,s}[r]
+\mathbf{1}_{\{t=d_s r\}}.
+\end{equation}
+Then
+\begin{equation}
+\mathcal{T}_{u,1,K_{u,G}}x
+=
+\sum_{s\in G}
+\pi_{u,s}\mathcal{T}_{u,d_s,\widetilde{k}_{u,s}}x,
+\end{equation}
+so the aggregation is exact rather than approximate.
+
+A singleton group retains the original compact dilated kernel and has cost
+$c(\{s\})=2M+3$. A multi-scale group has dense unit-dilation support cost
+\begin{equation}
+c(G)=2(M+1)\max_{s\in G}d_s+1,
+\qquad |G|>1.
+\end{equation}
+We select the lexicographically optimal partition
+\begin{equation}
+\mathcal{P}^{\star}
+=
+\arg\min_{\mathcal{P}}^{\mathrm{lex}}
+\left(
+\sum_{G\in\mathcal{P}}c(G),
+|\mathcal{P}|
+\right),
+\end{equation}
+where the first component is the dense axial tap count and the second is the
+number of axial convolution calls. After sorting scales by dilation, the optimum
+is obtained by the dynamic-programming recurrence
+\begin{equation}
+J(i)=\min_{0\le j<i}
+\left[J(j)+c(\{j,\ldots,i-1\})\right].
+\end{equation}
+Because the all-singleton partition is feasible, the selected realization cannot
+increase the modeled dense tap count, and its number of groups cannot exceed the
+original number of scales.
+
+For the default $M=1$ and $\mathcal{D}=\{1,2,4\}$, the original per-axis cost is
+$5+5+5=15$ taps and three calls. Complete fusion costs 17 taps. The optimum is
+$\{\{1,2\},\{4\}\}$, with $9+5=14$ taps and two calls. Across height and width,
+this changes the realization from six to four axial calls and from 30 to 28 dense
+taps, while preserving the learned mapping.
+
+The existing stability result is unchanged. In fact,
+\begin{equation}
+\sum_{u,G}\lVert K_{u,G}\rVert_1
+\le
+\sum_{u,s}\pi_{u,s}\lVert\widetilde{k}_{u,s}\rVert_1
+\le 1,
+\end{equation}
+and hence $\lVert\mathcal{F}x\rVert_p\le\lVert x\rVert_p$. The spectral response
+is also preserved because
+\begin{equation}
+\widehat{K}_{u,G}(\omega)
+=
+\sum_{s\in G}\pi_{u,s}
+\widehat{\widetilde{k}}_{u,s}(d_s\omega).
+\end{equation}
+Thus, the cosine-modulated multiplier interpretation and the Fredholm-type
+motivation remain valid.
+
+We verified the realization against the uploaded branch implementation over 720
+configurations covering multiple radii, dilation sets, padding modes, feature-map
+sizes, floating-point types, and pointwise-block settings. The maximum output
+and parameter-gradient differences were $4.77\times10^{-7}$ and
+$1.19\times10^{-7}$, respectively, with 100\% prediction agreement and no cost
+regression. A 50-step AdamW trajectory had zero maximum loss difference and a
+maximum final parameter difference of $1.19\times10^{-7}$. Controlled CPU tests,
+with caching disabled and only the realization switch changed, showed adapter-level
+inference speedups from $1.14\times$ to $1.25\times$ and forward--backward speedups
+from $1.23\times$ to $1.48\times$. These measurements demonstrate an exact
+mathematical execution optimization rather than a change to the data, optimizer,
+baselines, or evaluation pipeline.

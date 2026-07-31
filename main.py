@@ -101,6 +101,7 @@ def get_args_parser():
     parser.add_argument("--hcc_scale_adaptive", type=str2bool, default=False, help="Enable learnable axis--scale gates for DT1D.")
     parser.add_argument("--hcc_separate_axis_kernels", type=str2bool, default=True, help="Use separate group-shared kernels for each axis and dilation when scale-adaptive DT1D is enabled.")
     parser.add_argument("--hcc_gate_temperature", type=float, default=1.0, help="Softmax temperature for DT1D axis--scale gates.")
+    parser.add_argument("--hcc_exact_cost_realization", type=str2bool, default=True, help="Use the exact minimum-cost Laurent realization of static axis--scale DT1D branches. Set false only for the branch-form ablation.")
     parser.add_argument("--hcc_input_adaptive_gate", type=str2bool, default=False, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
     parser.add_argument("--hcc_gate_reduction", type=int, default=4, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
     parser.add_argument("--hcc_M", type=int, default=1)
@@ -120,6 +121,7 @@ def get_args_parser():
     parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable axis--scale gates for DT1D.")
     parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None, help="Use separate group-shared kernels for each axis and dilation.")
     parser.add_argument("--dt_gate_temperature", type=float, default=None, help="Softmax temperature for DT1D axis--scale gates.")
+    parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None, help="Official alias for --hcc_exact_cost_realization.")
     parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
     parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
@@ -295,6 +297,8 @@ def canonicalize_args(args):
         args.hcc_separate_axis_kernels = args.dt_separate_axis_kernels
     if args.dt_gate_temperature is not None:
         args.hcc_gate_temperature = args.dt_gate_temperature
+    if args.dt_exact_cost_realization is not None:
+        args.hcc_exact_cost_realization = args.dt_exact_cost_realization
     if args.dt_input_adaptive_gate is not None:
         args.hcc_input_adaptive_gate = args.dt_input_adaptive_gate
     if args.dt_gate_reduction is not None:
@@ -614,6 +618,7 @@ def _add_adapters(model_backbone: nn.Module, args):
                 scale_adaptive=args.hcc_scale_adaptive,
                 separate_axis_kernels=args.hcc_separate_axis_kernels,
                 gate_temperature=args.hcc_gate_temperature,
+                exact_cost_realization=args.hcc_exact_cost_realization,
                 input_adaptive_gate=args.hcc_input_adaptive_gate,
                 gate_reduction=args.hcc_gate_reduction,
                 axis=args.hcc_axis,

@@ -1,0 +1,14 @@
+{
+  "before": {
+    "flops": 7363157920,
+    "conv2d_calls": 84,
+    "max_key_cpu_memory_usage": 82135296,
+    "sum_positive_self_cpu_memory": 226794692
+  },
+  "after": {
+    "flops": 7354126560,
+    "conv2d_calls": 68,
+    "max_key_cpu_memory_usage": 69635552,
+    "sum_positive_self_cpu_memory": 165327492
+  }
+}

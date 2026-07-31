@@ -1,0 +1,91 @@
+{
+  "configuration_count": 720,
+  "dimensions": {
+    "M": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "dilation_sets": [
+      [
+        1,
+        2
+      ],
+      [
+        1,
+        2,
+        4
+      ],
+      [
+        1,
+        3,
+        5
+      ],
+      [
+        2,
+        4
+      ],
+      [
+        1,
+        2,
+        3,
+        4
+      ]
+    ],
+    "paddings": [
+      "zeros",
+      "replicate",
+      "reflect"
+    ],
+    "shapes": [
+      [
+        19,
+        23
+      ],
+      [
+        7,
+        8
+      ],
+      [
+        3,
+        4
+      ]
+    ],
+    "dtypes": [
+      "float32",
+      "float64"
+    ],
+    "pointwise": [
+      false,
+      true
+    ]
+  },
+  "max_absolute_differences": {
+    "output_abs": 4.76837158203125e-07,
+    "input_grad_abs": 1.4901161193847656e-08,
+    "parameter_grad_abs": 1.1920928955078125e-07,
+    "loss_abs": 4.76837158203125e-07
+  },
+  "minimum_prediction_agreement": 1.0,
+  "cost_violation_count": 0,
+  "cost_violations": [],
+  "synthetic_metric_regression": {
+    "old_accuracy": 0.14399999380111694,
+    "new_accuracy": 0.14399999380111694,
+    "old_cross_entropy": 1.9903228282928467,
+    "new_cross_entropy": 1.9903228282928467,
+    "top1_agreement": 1.0,
+    "max_logit_abs_difference": 2.9802322387695312e-08
+  },
+  "training_trajectory": {
+    "steps": 50,
+    "optimizer": "AdamW",
+    "max_loss_abs_difference": 0.0,
+    "max_logit_abs_difference": 2.9802322387695312e-08,
+    "minimum_top1_agreement": 1.0,
+    "max_parameter_abs_difference_after_50_steps": 1.1920928955078125e-07
+  },
+  "checkpoint_keys_identical": true,
+  "trainable_parameters_identical": true
+}
