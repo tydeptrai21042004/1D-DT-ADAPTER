@@ -104,6 +104,7 @@ def write_run_config(
     variant_name: str | None = None,
     variant_args: dict[str, Any] | None = None,
     smoke: bool = False,
+    generated_base: Path | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     preset = manifest["method_presets"][method_name]
     common = copy.deepcopy(manifest["common_args"])
@@ -146,9 +147,11 @@ def write_run_config(
     ensure_cnn_backbone(str(run_args["backbone"]))
     run_key = method_name if variant_name is None else f"{method_name}__{variant_name}"
     output_dir = output_root / target_name / str(run_args["dataset"]) / str(run_args["backbone"]) / run_key / f"seed_{seed}"
-    # Smoke tests must never overwrite the publication configurations committed
-    # under configs/paper/generated.
-    generated_base = (output_root / "_generated_configs") if smoke else (ROOT / "configs" / "paper" / "generated")
+    # Only the canonical paper manifest updates committed publication configs.
+    # Smoke runs and auxiliary manifests write generated YAML under their output
+    # root, preventing an ablation plan from polluting configs/paper/generated.
+    if generated_base is None:
+        generated_base = output_root / "_generated_configs"
     generated_dir = generated_base / target_name
     generated_dir.mkdir(parents=True, exist_ok=True)
     config_path = generated_dir / f"{run_key}_seed{seed}.yaml"
@@ -186,6 +189,7 @@ def iter_runs(
     data_path: Path,
     device: str,
     smoke: bool,
+    generated_base: Path | None = None,
 ):
     for target_name in names:
         target = manifest["targets"][target_name]
@@ -208,6 +212,7 @@ def iter_runs(
                         variant_name=variant_name,
                         variant_args=variant_args,
                         smoke=smoke,
+                        generated_base=generated_base,
                     )
         else:
             for method in methods:
@@ -222,6 +227,7 @@ def iter_runs(
                         data_path=data_path,
                         device=device,
                         smoke=smoke,
+                        generated_base=generated_base,
                     )
 
 
@@ -234,7 +240,8 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=ROOT / "outputs" / "cnn_paper_three_seed")
     parser.add_argument("--data-path", type=Path, default=ROOT / "data")
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="Resolve every command through run_from_config without training.")
+    parser.add_argument("--plan-only", action="store_true", help="Write generated configs and execution_plan.json, then exit without spawning runs.")
     parser.add_argument("--skip-if-complete", action="store_true")
     parser.add_argument("--smoke", action="store_true", help="Use a tiny local FakeData run on CPU.")
     parser.add_argument("--max-runs", type=int, default=None, help="Optional debugging cap.")
@@ -247,6 +254,13 @@ def main() -> int:
     output_root = ns.output_root if ns.output_root.is_absolute() else ROOT / ns.output_root
     data_path = ns.data_path if ns.data_path.is_absolute() else ROOT / ns.data_path
 
+    auxiliary_manifest = manifest_path.resolve() != DEFAULT_MANIFEST.resolve()
+    generated_base = (
+        output_root / "_generated_configs"
+        if (ns.smoke or auxiliary_manifest)
+        else ROOT / "configs" / "paper" / "generated"
+    )
+
     runs = list(iter_runs(
         manifest=manifest,
         names=names,
@@ -256,6 +270,7 @@ def main() -> int:
         data_path=data_path.resolve(),
         device=ns.device,
         smoke=ns.smoke,
+        generated_base=generated_base,
     ))
     if ns.max_runs is not None:
         runs = runs[: max(0, ns.max_runs)]
@@ -277,6 +292,8 @@ def main() -> int:
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "execution_plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(plan, indent=2))
+    if ns.plan_only:
+        return 0
 
     for index, (config_path, output_dir, _meta) in enumerate(runs, start=1):
         command = [

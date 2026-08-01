@@ -168,6 +168,11 @@ def main() -> int:
     except ValueError:
         source_config_label = str(config_path)
 
+    run_metadata = {key: value for key, value in config.items() if key != "args"}
+    (output_dir / "run_metadata.json").write_text(
+        json.dumps(run_metadata, indent=2, default=str) + "\n", encoding="utf-8"
+    )
+
     resolved = {
         "schema_version": 1,
         "source_config": source_config_label,

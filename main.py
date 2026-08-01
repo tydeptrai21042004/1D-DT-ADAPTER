@@ -111,6 +111,8 @@ def get_args_parser():
     parser.add_argument("--dt_gate_temperature", type=float, default=None)
     parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None)
     parser.add_argument("--dt_closed_form_dyadic_realization", type=str2bool, default=None)
+    parser.add_argument("--dt_minimal_quotient_realization", type=str2bool, default=None, help="Use the Minimal Laurent Quotient dyadic DT1D parameterization.")
+    parser.add_argument("--dt_quotient_support_cap", type=int, default=None, choices=[4,8], help="Maximum MLQ dyadic offset; 4 removes the aliased outer d=4 second harmonic.")
     parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
@@ -317,6 +319,8 @@ def canonicalize_args(args):
         "dt_gate_temperature": 1.0,
         "dt_exact_cost_realization": True,
         "dt_closed_form_dyadic_realization": True,
+        "dt_minimal_quotient_realization": False,
+        "dt_quotient_support_cap": 8,
         "dt_input_adaptive_gate": False,
         "dt_gate_reduction": 4,
         "dt_axis": "hw",
@@ -338,6 +342,8 @@ def canonicalize_args(args):
         "dt_gate_temperature": "hcc_gate_temperature",
         "dt_exact_cost_realization": "hcc_exact_cost_realization",
         "dt_closed_form_dyadic_realization": "hcc_closed_form_dyadic_realization",
+        "dt_minimal_quotient_realization": "hcc_minimal_quotient_realization",
+        "dt_quotient_support_cap": "hcc_quotient_support_cap",
         "dt_input_adaptive_gate": "hcc_input_adaptive_gate",
         "dt_gate_reduction": "hcc_gate_reduction",
         "dt_axis": "hcc_axis",
@@ -520,11 +526,21 @@ def _replace_classifier_head(model_backbone: nn.Module, num_classes: int, keep_p
     return replaced
 
 
-def _freeze_batchnorm(model: nn.Module):
+def _freeze_batchnorm(model: nn.Module, *, freeze_affine: bool = True):
+    """Freeze BatchNorm running statistics, optionally freezing affine terms.
+
+    ``engine.train_one_epoch`` calls ``model.train(True)`` every epoch.  The
+    private marker below lets the engine immediately restore these BatchNorm
+    modules to evaluation mode, so frozen-backbone methods never update running
+    means/variances accidentally.  BitFit uses ``freeze_affine=False`` so BN
+    bias parameters remain eligible while BN statistics and scale parameters
+    stay frozen.
+    """
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d):
             m.eval()
-            if m.affine:
+            m._dt1d_force_eval = True
+            if m.affine and freeze_affine:
                 if m.weight is not None:
                     m.weight.requires_grad = False
                 if m.bias is not None:
@@ -685,14 +701,15 @@ def _add_adapters(model_backbone: nn.Module, args):
                 gate_temperature=args.dt_gate_temperature,
                 exact_cost_realization=args.dt_exact_cost_realization,
                 closed_form_dyadic_realization=args.dt_closed_form_dyadic_realization,
+                minimal_quotient_realization=args.dt_minimal_quotient_realization,
+                quotient_support_cap=args.dt_quotient_support_cap,
                 input_adaptive_gate=args.dt_input_adaptive_gate,
                 gate_reduction=args.dt_gate_reduction,
                 axis=args.dt_axis,
                 alpha_group=args.dt_alpha_group,
                 per_channel=False,
                 tie_sym=args.dt_tie_sym,
-                use_pw=not args.dt_no_pw,
-                no_pw=not not args.dt_no_pw,
+                no_pw=bool(args.dt_no_pw),
                 pw_ratio=args.dt_pw_ratio,
                 pw_groups=args.dt_pw_groups,
                 use_bn=args.dt_use_bn,
@@ -820,13 +837,17 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
         return model
 
     if method == "bitfit":
+        # Strict BitFit: train every explicit bias tensor and, optionally, the
+        # complete task head.  BatchNorm running statistics remain frozen, but
+        # affine bias terms are not silently disabled (the v8 policy did that
+        # and made torchvision ResNet-18 BitFit collapse to Linear probing).
+        _freeze_batchnorm(model, freeze_affine=False)
         for name, p in model.named_parameters():
             if name.endswith(".bias"):
                 p.requires_grad = True
             if args.bitfit_train_head and _is_head_param(name):
                 p.requires_grad = True
         args.weight_decay = 0.0
-        _freeze_batchnorm(model)
         return model
 
     # PEFT: adapters and task head only.

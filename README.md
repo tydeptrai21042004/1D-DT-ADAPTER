@@ -1,4 +1,14 @@
-# DT1D-Adapter — CNN Three-Seed Reproducibility Release
+# SCDQ-DT1D v0.9.1
+
+The final comparison preset now uses the **Spectrally Closed Dyadic Quotient**
+parameterization with support cap 4, reflect padding, group size 16, and no
+optional pointwise mixer. The original shifted-symmetric group-shared axial
+convolution remains the trainable spatial operator.
+
+For Kaggle, upload `DT1D_V9_SCDQ_KAGGLE_FINAL.zip` as a Dataset and paste
+`KAGGLE_SCDQ_FULL_CELL.txt` into one notebook cell, or push branch
+`dt1d-v9-scdq-math-latency` and let the same cell clone it.
+
 
 This repository is the **CNN-only** experimental package for DT1D-Adapter. New paper runs use the canonical implementation `models/dt1d_adapter.py`, class `DT1DAdapter`, CLI method `--tuning_method dt`, and `--dt_*` arguments. `models/hcc_adapter.py` is retained only as a compatibility shim for older checkpoints.
 
@@ -12,6 +22,20 @@ This repository is the **CNN-only** experimental package for DT1D-Adapter. New p
 - Aggregation exports raw runs and `mean ± standard deviation` summaries in CSV, JSON, and LaTeX formats.
 - Figure 1 and Figure 4 are regenerated from three-seed outputs. Figures 2 and 3 are deterministic and do not require training seeds.
 - ViT, Swin, Transformer, and token-prompt experiments are rejected by the CNN paper runner.
+
+## V9 mathematical latency revision
+
+The repository now includes **SCDQ-DT1D**, a Spectrally Closed Dyadic Quotient parameterization that retains reduced axial filtering and shifted symmetric group-shared kernels while removing the exact dyadic scale nullspace. See [`MLQ_SCDQ_FINAL_REPORT.md`](MLQ_SCDQ_FINAL_REPORT.md).
+
+Key commands:
+
+```bash
+pytest -q
+python tools/validate_mlq_theory.py
+python tools/benchmark_mlq_latency.py --batch-size 4 --warmup 3 --iters 10
+```
+
+The final three-seed ablation configurations are under `configs/experiments/table_14_15_mlq_ablation/`.
 
 ## Supported manuscript targets
 
@@ -133,10 +157,10 @@ Each run directory contains `args.json`, `resolved_config.json`, `command.sh`, `
 
 ## Kaggle
 
-Push branch `dt1d-v8-cnn-three-seed`, enable Internet and a GPU, then use [`KAGGLE_CNN_THREE_SEED_RUN.sh`](KAGGLE_CNN_THREE_SEED_RUN.sh). Select a target at the top of the cell:
+Push branch `dt1d-v9-scdq-math-latency`, enable Internet and a GPU, then use [`KAGGLE_SCDQ_FULL_CELL.txt`](KAGGLE_SCDQ_FULL_CELL.txt). Select a target at the top of the cell:
 
 ```bash
-BRANCH="dt1d-v8-cnn-three-seed"
+BRANCH="dt1d-v9-scdq-math-latency"
 TARGET="table_14_15"
 SEEDS="0,1,2"
 ```
@@ -163,7 +187,7 @@ python tools/run_cnn_paper.py \
 
 ## Release
 
-Prepared branch: `dt1d-v8-cnn-three-seed`  
+Prepared branch: `dt1d-v9-scdq-math-latency`  
 Prepared tag: `v0.8.0`
 
 See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`MANUSCRIPT_TO_CODE.md`](MANUSCRIPT_TO_CODE.md), [`MANUSCRIPT_ALIGNMENT_NOTES.md`](MANUSCRIPT_ALIGNMENT_NOTES.md), and [`PRETRAINED_WEIGHTS.md`](PRETRAINED_WEIGHTS.md).

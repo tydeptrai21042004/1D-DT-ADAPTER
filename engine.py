@@ -68,6 +68,12 @@ def train_one_epoch(
     use_amp: bool = False,
 ):
     model.train(True)
+    # Frozen-backbone policies mark BatchNorm modules whose running statistics
+    # must stay fixed.  ``model.train(True)`` resets every submodule, so restore
+    # those marked modules immediately at the start of each epoch.
+    for module in model.modules():
+        if getattr(module, "_dt1d_force_eval", False):
+            module.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     metric_logger.add_meter("min_lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))

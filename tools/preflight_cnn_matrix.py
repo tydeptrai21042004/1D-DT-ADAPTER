@@ -151,6 +151,15 @@ def main() -> int:
                         raise AssertionError(f"Linear probing has invalid count {trainable}/{total}")
                     if any(not training._is_head_param(name) for name in trainable_names):
                         raise AssertionError("Linear probing exposed non-head parameters")
+                if method_name == "bitfit":
+                    non_head_biases = [
+                        name for name in trainable_names
+                        if name.endswith(".bias") and not training._is_head_param(name)
+                    ]
+                    if not non_head_biases:
+                        raise AssertionError(
+                            "BitFit exposed no backbone bias parameters and collapsed to Linear probing"
+                        )
                 if method_name not in {"full", "linear"} and not (0 < trainable < total):
                     raise AssertionError(f"PEFT method has invalid count {trainable}/{total}")
 
@@ -198,7 +207,7 @@ def main() -> int:
         "records": records,
         "note": (
             "Historical count mismatches are diagnostic unless --strict-historical-counts is used. "
-            "The canonical source is authoritative for the v0.8.0 rerun."
+            "Historical counts describe the prior manuscript; the v0.9.1 SCDQ source is authoritative for new reruns."
         ),
     }
     text = json.dumps(report, indent=2)

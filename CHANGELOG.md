@@ -1,3 +1,13 @@
+# v0.9.1 — corrected SCDQ/Kaggle release
+
+- Makes SCDQ4 with reflect padding and no pointwise mixer the Table 14–15 proposal preset.
+- Adds a 13-variant, three-seed SCDQ ablation manifest.
+- Adds one Kaggle cell for the 30-run comparison and 39-run ablation.
+- Writes `run_metadata.json` for direct YAML runs so aggregation is complete.
+- Fixes strict BitFit on torchvision ResNet by retaining trainable backbone biases while freezing BatchNorm statistics.
+- Keeps frozen BatchNorm modules in evaluation mode after every `model.train(True)` call.
+- Validates 52,781 trainable parameters for the final Caltech101/ResNet-18 configuration.
+
 # Changelog
 
 ## 0.8.0 — 2026-08-01
@@ -23,3 +33,14 @@
 
 - Integrated the AMP dtype correction into the canonical source.
 - Added the initial publication reproducibility package and release metadata.
+
+## v0.9.0 — SCDQ mathematical latency revision
+
+- Added the Minimal Laurent Quotient parameterization for the dyadic `M=1`, `d={1,2,4}` shifted-symmetric axial operator.
+- Proved and tested the rank-five quotient and exact scale-cancellation null direction.
+- Added the Spectrally Closed Dyadic Quotient (`support_cap=4`) final variant.
+- Added joint two-axis L1 projection and non-expansive stability tests.
+- Added exact legacy-to-MLQ8 forward and input-gradient conversion tests.
+- Added 30 three-seed Caltech101/ResNet-18 ablation YAML files.
+- Added deterministic theory and structural latency validation scripts.
+- Full suite: 304 passed, 1 skipped, 10 subtests passed.

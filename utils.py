@@ -418,7 +418,10 @@ class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
     def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+        try:
+            self._scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
+        except (AttributeError, TypeError):  # compatibility with older PyTorch
+            self._scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward(create_graph=create_graph)
