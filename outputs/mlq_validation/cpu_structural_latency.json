@@ -1,0 +1,57 @@
+{
+  "environment": {
+    "torch": "2.10.0+cpu",
+    "device": "cpu",
+    "threads": 5,
+    "batch_size": 4,
+    "warmup": 3,
+    "iters": 10
+  },
+  "results": [
+    {
+      "variant": "legacy_closed_pointwise",
+      "median_ms_per_batch": 105.71479850000287,
+      "mean_ms_per_batch": 110.8481771999891,
+      "median_ms_per_image": 26.428699625000718,
+      "median_fps": 37.837654299647475,
+      "latency_reduction_vs_legacy_pct": 0.0,
+      "throughput_gain_vs_legacy_pct": 0.0
+    },
+    {
+      "variant": "mlq8_pointwise",
+      "median_ms_per_batch": 96.40903949997437,
+      "mean_ms_per_batch": 101.48542679997945,
+      "median_ms_per_image": 24.102259874993592,
+      "median_fps": 41.4898853960791,
+      "latency_reduction_vs_legacy_pct": 8.80270230097279,
+      "throughput_gain_vs_legacy_pct": 9.65237186086785
+    },
+    {
+      "variant": "scdq4_pointwise",
+      "median_ms_per_batch": 91.52855900003942,
+      "mean_ms_per_batch": 91.45499250001876,
+      "median_ms_per_image": 22.882139750009856,
+      "median_fps": 43.70220665222401,
+      "latency_reduction_vs_legacy_pct": 13.419350650290522,
+      "throughput_gain_vs_legacy_pct": 15.499249256133645
+    },
+    {
+      "variant": "mlq8_core",
+      "median_ms_per_batch": 87.72945799995568,
+      "mean_ms_per_batch": 85.05614990000367,
+      "median_ms_per_image": 21.93236449998892,
+      "median_fps": 45.59471916493569,
+      "latency_reduction_vs_legacy_pct": 17.01307740755586,
+      "throughput_gain_vs_legacy_pct": 20.500913729634885
+    },
+    {
+      "variant": "scdq4_core_final",
+      "median_ms_per_batch": 85.02006650007843,
+      "mean_ms_per_batch": 81.66851810002527,
+      "median_ms_per_image": 21.255016625019607,
+      "median_fps": 47.04771667046756,
+      "latency_reduction_vs_legacy_pct": 19.576002880924833,
+      "throughput_gain_vs_legacy_pct": 24.340997192592592
+    }
+  ]
+}

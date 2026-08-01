@@ -1,0 +1,22 @@
+{
+  "quotient_rank": 5,
+  "quotient_singular_values": [
+    3.613229477135107,
+    1.4142135623730954,
+    1.244577906934338,
+    1.0000000000000002,
+    0.628966278216017
+  ],
+  "legacy_null_residual_max": 0.0,
+  "legacy_to_mlq8_forward_max_abs_error": 2.384185791015625e-07,
+  "legacy_to_mlq8_input_gradient_max_abs_error": 2.9103830456733704e-11,
+  "scdq4_max_joint_axis_l1_norm": 1.0,
+  "legacy_core_parameters": 55,
+  "mlq8_core_parameters": 41,
+  "scdq4_core_parameters": 33,
+  "legacy_axial_calls_per_adapter": 4,
+  "mlq8_axial_calls_per_adapter": 2,
+  "scdq4_axial_calls_per_adapter": 2,
+  "legacy_effective_max_offset": 8,
+  "scdq4_effective_max_offset": 4
+}
