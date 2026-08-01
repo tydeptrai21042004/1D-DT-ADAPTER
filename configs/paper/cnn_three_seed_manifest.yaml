@@ -1,0 +1,238 @@
+schema_version: 2
+scope: cnn_classification_only
+default_seeds: [0, 1, 2]
+description: >-
+  Three-independent-seed execution matrix for every CNN classification table and
+  result-driven figure in the manuscript. Transformer/ViT experiments are intentionally
+  excluded. Full fine-tuning and Linear probing are included in every comparison table.
+
+common_args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.2
+
+method_presets:
+  dt1d:
+    label: DT1D-Adapter
+    args:
+      tuning_method: dt
+      freeze_backbone: true
+      dt_M: 1
+      dt_h: 1
+      dt_dilations: "1,2,4"
+      dt_scale_adaptive: true
+      dt_separate_axis_kernels: true
+      dt_gate_temperature: 1.0
+      dt_exact_cost_realization: true
+      dt_closed_form_dyadic_realization: true
+      dt_input_adaptive_gate: false
+      dt_axis: hw
+      dt_alpha_group: 16
+      dt_no_pw: false
+      dt_pw_ratio: 32
+      dt_pw_groups: 4
+      dt_gate_init: 0.01
+      dt_padding: reflect
+      adapt_scale: 1.0
+  full:
+    label: Full fine-tuning
+    args:
+      tuning_method: full
+      freeze_backbone: false
+  linear:
+    label: Linear probing
+    args:
+      tuning_method: linear
+      freeze_backbone: true
+  conv_r2:
+    label: Conv-Adapter (r=2)
+    args: {tuning_method: conv, freeze_backbone: true, adapt_size: 2, kernel_size: 3, adapt_scale: 1.0}
+  conv_r4:
+    label: Conv-Adapter (r=4)
+    args: {tuning_method: conv, freeze_backbone: true, adapt_size: 4, kernel_size: 3, adapt_scale: 1.0}
+  conv_r6:
+    label: Conv-Adapter (r=6)
+    args: {tuning_method: conv, freeze_backbone: true, adapt_size: 6, kernel_size: 3, adapt_scale: 1.0}
+  conv_r8:
+    label: Conv-Adapter (r=8)
+    args: {tuning_method: conv, freeze_backbone: true, adapt_size: 8, kernel_size: 3, adapt_scale: 1.0}
+  residual:
+    label: Residual Adapters
+    args: {tuning_method: residual, freeze_backbone: true, ra_mode: parallel, ra_reduction: 16, ra_norm: bn, ra_act: relu, ra_gate_init: 0.0, ra_stages: "1,2,3,4"}
+  ssf:
+    label: SSF
+    args: {tuning_method: ssf, freeze_backbone: true, ssf_init_scale: 1.0, ssf_init_shift: 0.0}
+  bitfit:
+    label: BitFit
+    args: {tuning_method: bitfit, freeze_backbone: true, bitfit_train_head: true}
+  bam:
+    label: BAM-Tuning
+    args: {tuning_method: bam, freeze_backbone: true, bam_reduction: 16, bam_dilation: 4, bam_gate_init: 0.0, bam_use_bn: true, bam_insert: stage, bam_stages: "1,2,3,4"}
+  lora_conv:
+    label: LoRA-Conv
+    args: {tuning_method: lora_conv, freeze_backbone: true, lora_r: 8, lora_alpha: 16.0, lora_target: all}
+  sidetune:
+    label: Side-Tuning
+    args: {tuning_method: sidetune, freeze_backbone: true, sidetune_alpha: 0.5, sidetune_learn_alpha: true, sidetune_width: 64, sidetune_depth: 3}
+
+all_cnn_methods: [dt1d, full, linear, conv_r2, conv_r4, conv_r6, conv_r8, residual, ssf, bitfit, bam, lora_conv, sidetune]
+
+targets:
+  table_02:
+    kind: ablation
+    manuscript_tables: [2]
+    dataset: dtd
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    methods: [dt1d]
+    variants:
+      full_dt1d: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 16, dt_no_pw: false}
+      m1: {dt_M: 1, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 16, dt_no_pw: false}
+      m3: {dt_M: 3, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 16, dt_no_pw: false}
+      single_dilation: {dt_M: 2, dt_dilations: "1", dt_axis: hw, dt_alpha_group: 16, dt_no_pw: false}
+      height_only: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: h, dt_alpha_group: 16, dt_no_pw: false}
+      width_only: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: w, dt_alpha_group: 16, dt_no_pw: false}
+      group32: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 32, dt_no_pw: false}
+      group8: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 8, dt_no_pw: false}
+      no_pointwise: {dt_M: 2, dt_dilations: "1,2,4", dt_axis: hw, dt_alpha_group: 16, dt_no_pw: true}
+  table_03:
+    kind: comparison
+    manuscript_tables: [3]
+    dataset: dtd
+    backbone: resnet50
+    epochs: 100
+    batch_size: 128
+    methods: [dt1d, full, linear, conv_r8, conv_r4, conv_r2, conv_r6, ssf, bitfit, residual]
+  table_04:
+    kind: comparison
+    manuscript_tables: [4]
+    dataset: flowers102
+    backbone: resnet50
+    epochs: 100
+    batch_size: 128
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit, residual]
+  table_05:
+    kind: comparison
+    manuscript_tables: [5]
+    dataset: flowers102
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_06:
+    kind: comparison
+    manuscript_tables: [6]
+    dataset: flowers102
+    backbone: resnet18
+    epochs: 100
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_07:
+    kind: comparison
+    manuscript_tables: [7]
+    dataset: flowers102
+    backbone: resnet18
+    epochs: 100
+    batch_size: 32
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_08:
+    kind: comparison
+    manuscript_tables: [8]
+    dataset: svhn
+    backbone: resnet50
+    epochs: 10
+    batch_size: 128
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_09:
+    kind: comparison
+    manuscript_tables: [9]
+    dataset: oxford_iiit_pet
+    backbone: resnet50
+    epochs: 10
+    batch_size: 128
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_10:
+    kind: comparison
+    manuscript_tables: [10]
+    dataset: food101
+    backbone: resnet18
+    epochs: 10
+    batch_size: 32
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_11:
+    kind: comparison
+    manuscript_tables: [11]
+    dataset: food101
+    backbone: efficientnet_b0
+    epochs: 10
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_12:
+    kind: comparison
+    manuscript_tables: [12]
+    dataset: oxford_iiit_pet
+    backbone: efficientnet_b0
+    epochs: 10
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_13:
+    kind: comparison
+    manuscript_tables: [13]
+    dataset: oxford_iiit_pet
+    backbone: efficientnet_b0
+    epochs: 100
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, conv_r2, conv_r6, conv_r8, ssf, bitfit]
+  table_14_15:
+    kind: comparison
+    manuscript_tables: [14, 15]
+    dataset: caltech101
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    args: {val_ratio: 0.1, test_ratio: 0.1}
+    methods: [dt1d, full, linear, conv_r4, bam, residual, ssf, lora_conv, bitfit, sidetune]
+  table_18_19:
+    kind: comparison
+    manuscript_tables: [18, 19]
+    dataset: eurosat
+    backbone: mobilenet_v3_small
+    epochs: 25
+    batch_size: 32
+    args: {val_ratio: 0.1, test_ratio: 0.1}
+    methods: [dt1d, full, linear, conv_r4, bam]
+  figure_01:
+    kind: convergence_figure
+    manuscript_figures: [1]
+    dataset: caltech101
+    backbone: resnet18
+    epochs: 100
+    batch_size: 64
+    args: {val_ratio: 0.1, test_ratio: 0.1}
+    methods: [dt1d]
+  figure_04:
+    kind: tradeoff_figure
+    manuscript_figures: [4]
+    dataset: fgvc_aircraft
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    methods: [dt1d, full, linear, conv_r4, bam, residual, ssf, lora_conv, bitfit, sidetune]
