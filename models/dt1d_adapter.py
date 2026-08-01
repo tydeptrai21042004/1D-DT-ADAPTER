@@ -74,6 +74,8 @@ class DT1DAdapter(nn.Module):
         gate_temperature: float = 1.0,
         exact_cost_realization: bool = True,
         closed_form_dyadic_realization: bool = True,
+        minimal_quotient_realization: bool = False,
+        quotient_support_cap: int = 8,
         input_adaptive_gate: bool = False,  # deprecated/ignored; kept for CLI compatibility
         gate_reduction: int = 4,            # deprecated/ignored; kept for CLI compatibility
         **legacy,
@@ -128,6 +130,13 @@ class DT1DAdapter(nn.Module):
         # Exact closed-form evaluator for the paper configuration M=1 and
         # dilations=(1,2,4). It changes no parameters or represented operator.
         self.closed_form_dyadic_realization = bool(closed_form_dyadic_realization)
+        # Minimal Laurent quotient (MLQ): for M=1 and dyadic dilations (1,2,4),
+        # the three shifted-symmetric scale branches span a five-dimensional
+        # symmetric Laurent kernel on offsets {0, +/-1, +/-2, +/-4, +/-8}.
+        # This coordinate system removes the exact one-dimensional scale nullspace
+        # while preserving axial convolution and group-shared shifted symmetry.
+        self.minimal_quotient_realization = bool(minimal_quotient_realization)
+        self.quotient_support_cap = int(quotient_support_cap)
         # The GAP-MLP input-adaptive router has been removed. Keep these attributes
         # only so older scripts/checkpoints that inspect them do not fail.
         self.input_adaptive_gate = False
@@ -153,18 +162,43 @@ class DT1DAdapter(nn.Module):
         self.num_axes = len(self.axis_names)
         self.num_scales = len(self.dilations)
         self.num_alpha_axes = self.num_axes if self.separate_axis_kernels else 1
-        self.alpha = nn.Parameter(torch.zeros(self.num_alpha_axes, self.num_scales, self.num_alpha_groups, ncoef))
-        with torch.no_grad():
-            self.alpha[..., 0].fill_(1.0)  # identity-like axial filter before residual gate
 
-        # Static/global axis--scale logits. This is the old DT1D fusion mechanism:
-        # one small set of learnable logits is shared by all input samples.
-        # For A=2 axes and S=3 dilation scales this adds only A*S=6 parameters
-        # per inserted adapter. No GAP-MLP router is created.
-        if self.scale_adaptive:
-            self.axis_scale_logits = nn.Parameter(torch.zeros(self.num_axes, self.num_scales))
-        else:
+        if self.minimal_quotient_realization:
+            if self.M != 1 or tuple(self.dilations) != (1, 2, 4):
+                raise ValueError(
+                    "minimal_quotient_realization currently requires M=1 and dilations=(1,2,4)"
+                )
+            if not self.scale_adaptive:
+                raise ValueError("minimal_quotient_realization requires scale_adaptive=True")
+            if self.quotient_support_cap not in (4, 8):
+                raise ValueError("quotient_support_cap must be 4 or 8")
+            # Minimal quotient coordinates per axis/group, ordered by offsets
+            # (0,1,2,4) or (0,1,2,4,8). Negative offsets are tied exactly.
+            self.quotient_offsets = (0, 1, 2, 4, 8) if self.quotient_support_cap == 8 else (0, 1, 2, 4)
+            self.register_parameter("alpha", None)
+            self.quotient_beta = nn.Parameter(
+                torch.zeros(self.num_axes, self.num_alpha_groups, len(self.quotient_offsets))
+            )
+            with torch.no_grad():
+                # Exact legacy equal-route initialization. For alpha=(1,0), the
+                # normalized branch coefficient is u=1/2 and each of A*S routes
+                # has weight 1/(A*S).
+                init_side = 1.0 / float(2 * self.num_axes * self.num_scales)
+                self.quotient_beta[..., 1:4].fill_(init_side)
+            self.register_parameter("quotient_axis_logits", None)
             self.register_parameter("axis_scale_logits", None)
+        else:
+            self.alpha = nn.Parameter(torch.zeros(self.num_alpha_axes, self.num_scales, self.num_alpha_groups, ncoef))
+            with torch.no_grad():
+                self.alpha[..., 0].fill_(1.0)  # identity-like axial filter before residual gate
+            self.register_parameter("quotient_beta", None)
+            self.register_parameter("quotient_axis_logits", None)
+            # Static/global axis--scale logits. This is the old DT1D fusion mechanism:
+            # one small set of learnable logits is shared by all input samples.
+            if self.scale_adaptive:
+                self.axis_scale_logits = nn.Parameter(torch.zeros(self.num_axes, self.num_scales))
+            else:
+                self.register_parameter("axis_scale_logits", None)
         self.axis_scale_router = None
 
         # Optional grouped pointwise channel mixing.
@@ -196,14 +230,20 @@ class DT1DAdapter(nn.Module):
             f"scale_adaptive={self.scale_adaptive}, static_axis_scale_gate=True, "
             f"exact_cost_realization={self.exact_cost_realization}, "
             f"closed_form_dyadic_realization={self.closed_form_dyadic_realization}, "
+            f"minimal_quotient_realization={self.minimal_quotient_realization}, "
+            f"quotient_support_cap={self.quotient_support_cap}, "
             f"separate_axis_kernels={self.separate_axis_kernels}, "
             f"alpha_group={self.alpha_group}, G={self.num_alpha_groups}, "
             f"no_pw={self.no_pw}, gate={float(self.gate.detach().cpu()):.4g}"
         )
 
     def parameter_count_breakdown(self) -> Dict[str, int]:
-        axial = self.alpha.numel() + self.gate.numel()
-        axis_scale = 0 if self.axis_scale_logits is None else self.axis_scale_logits.numel()
+        if self.minimal_quotient_realization:
+            axial = self.quotient_beta.numel() + self.gate.numel()
+            axis_scale = 0
+        else:
+            axial = self.alpha.numel() + self.gate.numel()
+            axis_scale = 0 if self.axis_scale_logits is None else self.axis_scale_logits.numel()
         pw = sum(p.numel() for p in self.pw.parameters())
         return {
             "axial_alpha_and_gate": int(axial),
@@ -234,6 +274,84 @@ class DT1DAdapter(nn.Module):
         logits = self.axis_scale_logits.to(device=device, dtype=dtype) / self.gate_temperature
         weights = torch.softmax(logits.reshape(-1), dim=0)
         return weights.reshape(self.num_axes, self.num_scales)
+
+
+    @staticmethod
+    def dyadic_quotient_matrix(device=None, dtype=None) -> torch.Tensor:
+        """Return the rank-five map from legacy dyadic branch coordinates to MLQ taps.
+
+        Input coordinates are (p1,q1,p2,q2,p4,q4); output coordinates are
+        (beta0,beta1,beta2,beta4,beta8). The null vector
+        (0,1,-1,-1,1,0) is an exact scale-cancellation direction.
+        """
+        return torch.tensor(
+            [[0, 2, 0, 2, 0, 2],
+             [1, 0, 0, 0, 0, 0],
+             [0, 1, 1, 0, 0, 0],
+             [0, 0, 0, 1, 1, 0],
+             [0, 0, 0, 0, 0, 1]],
+            device=device, dtype=dtype or torch.float32,
+        )
+
+    def _normalized_quotient_beta(self, device, dtype) -> torch.Tensor:
+        """Jointly project all axis kernels into the non-expansive L1 ball.
+
+        The legacy routed operator already lies in this ball because its positive
+        routing weights sum to one and every branch has L1 norm at most one. Hence
+        this projection is identity on every legacy-representable kernel and only
+        prevents newly learned quotient coordinates from becoming expansive.
+        """
+        beta = self.quotient_beta.to(device=device, dtype=dtype)  # (A,G,5)
+        per_axis = beta[..., 0].abs() + 2.0 * beta[..., 1:].abs().sum(dim=-1)
+        total = per_axis.sum(dim=0)  # (G,)
+        scale = torch.maximum(total, torch.ones_like(total)).view(1, -1, 1)
+        return beta / scale
+
+    def _build_minimal_quotient_kernel_1d(
+        self, normalized_beta: torch.Tensor, axis_idx: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Build the MLQ kernel on offsets {0,+/-1,+/-2,+/-4,+/-8}."""
+        beta = normalized_beta[axis_idx]
+        radius = self.quotient_support_cap
+        wg = torch.zeros(self.num_alpha_groups, 2 * radius + 1, device=device, dtype=dtype)
+        center = radius
+        wg[:, center] = beta[:, 0]
+        for j, off in enumerate(self.quotient_offsets[1:], start=1):
+            wg[:, center - off] = beta[:, j]
+            wg[:, center + off] = beta[:, j]
+        return self._expand_group_kernel_to_channels(wg)
+
+    @torch.no_grad()
+    def initialize_quotient_from_legacy(self, legacy: "DT1DAdapter") -> None:
+        """Project a legacy M=1,d=(1,2,4) module into exact MLQ coordinates.
+
+        Exactness holds whenever all scale branches use the same linear boundary
+        extension. The projection is groupwise and preserves the residual gate.
+        """
+        if not self.minimal_quotient_realization:
+            raise RuntimeError("target module is not in minimal quotient mode")
+        if legacy.M != 1 or tuple(legacy.dilations) != (1, 2, 4):
+            raise ValueError("legacy module must use M=1 and dilations=(1,2,4)")
+        if legacy.num_axes != self.num_axes or legacy.num_alpha_groups != self.num_alpha_groups:
+            raise ValueError("legacy and quotient modules must have matching axes/groups")
+        weights = legacy._compute_axis_scale_weights(legacy.alpha.device, legacy.alpha.dtype)
+        betas = []
+        for ai in range(self.num_axes):
+            u, v = legacy._m1_dyadic_uv(ai, legacy.alpha.device, legacy.alpha.dtype)
+            p = weights[ai].unsqueeze(1) * u
+            q = weights[ai].unsqueeze(1) * v
+            beta = torch.stack(
+                (2.0 * (q[0] + q[1] + q[2]), p[0], q[0] + p[1], q[1] + p[2], q[2]),
+                dim=1,
+            )
+            betas.append(beta)
+        stacked = torch.stack(betas)
+        if self.quotient_support_cap == 4:
+            stacked = stacked[..., :4]
+        self.quotient_beta.copy_(stacked.to(self.quotient_beta))
+        self.gate.copy_(legacy.gate.to(self.gate))
+        if not self.no_pw and not legacy.no_pw:
+            self.pw.load_state_dict(legacy.pw.state_dict())
 
     def _expand_group_kernel_to_channels(self, wg: torch.Tensor) -> torch.Tensor:
         """Expand group-shared kernels from (G, K) to depthwise kernels (C, 1, K)."""
@@ -318,6 +436,10 @@ class DT1DAdapter(nn.Module):
         return self._expand_group_kernel_to_channels(wg)
 
 
+
+    # Pre-v0.7.0 private-name compatibility.
+    def _build_weighted_hcc_kernel_1d(self, *args, **kwargs):
+        return self._build_weighted_dt1d_kernel_1d(*args, **kwargs)
 
     def _build_m1_weighted_group_kernel_from_uv(
         self, u: torch.Tensor, v: torch.Tensor
@@ -571,8 +693,18 @@ class DT1DAdapter(nn.Module):
         if x.shape[1] != self.C:
             raise ValueError(f"Channel mismatch: adapter C={self.C}, input C={x.shape[1]}")
 
+        # Minimal Laurent quotient path: one exact symmetric axial convolution
+        # per enabled axis, with no scale-branch redundancy.
+        if self.minimal_quotient_realization:
+            beta = self._normalized_quotient_beta(x.device, x.dtype)
+            y = torch.zeros_like(x)
+            for ai, axis_name in enumerate(self.axis_names):
+                w1d = self._build_minimal_quotient_kernel_1d(
+                    beta, ai, x.device, x.dtype
+                )
+                y = y + self._conv_axis(x, axis_name, w1d, dilation=1)
         # Step 2 path: static/global mixture over axis--dilation responses.
-        if self.scale_adaptive:
+        elif self.scale_adaptive:
             weights = self._compute_axis_scale_weights(x.device, x.dtype)  # (A, S)
             y = torch.zeros_like(x)
             for ai, axis_name in enumerate(self.axis_names):

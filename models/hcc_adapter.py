@@ -6,7 +6,10 @@ canonical module. This shim is retained only so older checkpoints and scripts
 can be migrated without silently breaking.
 """
 
-from .dt1d_adapter import DT1DAdapter
+try:
+    from .dt1d_adapter import DT1DAdapter
+except ImportError:  # direct file loading in legacy tests/scripts
+    from models.dt1d_adapter import DT1DAdapter
 
 HCCAdapter = DT1DAdapter
 H1D_DT_Adapter = DT1DAdapter

@@ -67,6 +67,8 @@ def set_tuning_config(tuning_method, args):
             "residual_scale": getattr(args, "adapt_scale", 1.0),
             "gate_init": getattr(args, "dt_gate_init", 0.01),
             "padding_mode": getattr(args, "dt_padding", "reflect"),
+            "minimal_quotient_realization": getattr(args, "dt_minimal_quotient_realization", False),
+            "quotient_support_cap": getattr(args, "dt_quotient_support_cap", 8),
         }
 
     if tm == "bam":
