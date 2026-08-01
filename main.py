@@ -4,7 +4,7 @@ Revision-focused training script.
 
 Main fixes for reviewer/editor comments:
 1. Adds full fine-tuning and linear-probe baselines.
-2. Adds official DT1D/--dt_* arguments and maps legacy HCC names safely.
+2. Uses DT1D-Adapter/--dt_* as the canonical public API; legacy HCC flags are deprecated aliases.
 3. Uses train/val/test semantics: best checkpoint is selected on validation, then
    evaluated once on test.
 4. Adds profiling hooks for trainable params, total params, FLOPs, latency, and memory.
@@ -15,6 +15,7 @@ Main fixes for reviewer/editor comments:
 from __future__ import annotations
 
 import argparse
+import random
 import datetime
 import json
 import os
@@ -27,9 +28,15 @@ import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
-from timm.data.mixup import Mixup
-from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
-from timm.utils import ModelEma
+try:
+    from timm.data.mixup import Mixup
+    from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+    from timm.utils import ModelEma
+except ImportError:  # allows source/package tests before optional training deps are installed
+    Mixup = None
+    LabelSmoothingCrossEntropy = None
+    SoftTargetCrossEntropy = None
+    ModelEma = None
 
 from datasets import build_dataset
 try:
@@ -76,9 +83,9 @@ def get_args_parser():
     parser.add_argument(
         "--tuning_method",
         type=str,
-        default="hcc",
+        default="dt",
         help=(
-            "full | linear | prompt | conv | adapter | hcc | dt | bam | residual | "
+            "full | linear | prompt | conv | adapter | dt | bam | residual | "
             "ssf | lora_conv | bitfit | sidetune"
         ),
     )
@@ -95,41 +102,48 @@ def get_args_parser():
     parser.add_argument("--adapt_size", default=8, type=float)
     parser.add_argument("--adapt_scale", default=1.0, type=float)
 
-    # Legacy HCC args
-    parser.add_argument("--hcc_h", type=int, default=1)
-    parser.add_argument("--hcc_dilations", type=str, default=None, help="Comma-separated dilation basis for Step-2 scale-adaptive DT1D, e.g. '1,2,4'.")
-    parser.add_argument("--hcc_scale_adaptive", type=str2bool, default=False, help="Enable learnable axis--scale gates for DT1D.")
-    parser.add_argument("--hcc_separate_axis_kernels", type=str2bool, default=True, help="Use separate group-shared kernels for each axis and dilation when scale-adaptive DT1D is enabled.")
-    parser.add_argument("--hcc_gate_temperature", type=float, default=1.0, help="Softmax temperature for DT1D axis--scale gates.")
-    parser.add_argument("--hcc_input_adaptive_gate", type=str2bool, default=False, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
-    parser.add_argument("--hcc_gate_reduction", type=int, default=4, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
-    parser.add_argument("--hcc_M", type=int, default=1)
-    parser.add_argument("--hcc_axis", type=str, default="hw", choices=["h", "w", "hw"])
-    parser.add_argument("--hcc_padding", type=str, default="reflect", choices=["reflect", "replicate", "zeros"])
-    parser.add_argument("--hcc_per_channel", type=str2bool, default=False)
-    parser.add_argument("--hcc_use_center", type=str2bool, default=True)
-    parser.add_argument("--hcc_pw_ratio", type=int, default=8)
-    parser.add_argument("--hcc_use_pw", type=str2bool, default=True)
-    parser.add_argument("--hcc_gate_init", type=float, default=0.0)
-    parser.add_argument("--hcc_tie_sym", type=str2bool, default=True)
-
-    # Official DT1D aliases used in revised paper/README
+    # Canonical DT1D-Adapter arguments used by the manuscript and release scripts.
     parser.add_argument("--dt_M", type=int, default=None)
     parser.add_argument("--dt_h", type=int, default=None)
-    parser.add_argument("--dt_dilations", type=str, default=None, help="Comma-separated dilation basis for Step-2 scale-adaptive DT1D, e.g. '1,2,4'.")
-    parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable axis--scale gates for DT1D.")
-    parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None, help="Use separate group-shared kernels for each axis and dilation.")
-    parser.add_argument("--dt_gate_temperature", type=float, default=None, help="Softmax temperature for DT1D axis--scale gates.")
-    parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
-    parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated/ignored in static-gate WHC-DT1D. Kept for CLI compatibility.")
+    parser.add_argument("--dt_dilations", type=str, default=None, help="Comma-separated dilation basis, e.g. 1,2,4.")
+    parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable static axis-scale gates.")
+    parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None)
+    parser.add_argument("--dt_gate_temperature", type=float, default=None)
+    parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None)
+    parser.add_argument("--dt_closed_form_dyadic_realization", type=str2bool, default=None)
+    parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
+    parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
-    parser.add_argument("--dt_alpha_group", type=int, default=16)
+    parser.add_argument("--dt_alpha_group", type=int, default=None)
     parser.add_argument("--dt_no_pw", type=str2bool, default=None)
     parser.add_argument("--dt_pw_ratio", type=int, default=None)
-    parser.add_argument("--dt_pw_groups", type=int, default=4)
+    parser.add_argument("--dt_pw_groups", type=int, default=None)
     parser.add_argument("--dt_gate_init", type=float, default=None)
     parser.add_argument("--dt_padding", type=str, default=None, choices=["reflect", "replicate", "zeros"])
-    parser.add_argument("--dt_use_bn", type=str2bool, default=False)
+    parser.add_argument("--dt_use_bn", type=str2bool, default=None)
+    parser.add_argument("--dt_tie_sym", type=str2bool, default=None)
+
+    # Deprecated pre-v0.7.0 aliases. They are accepted, normalized to --dt_*,
+    # recorded in args.json under legacy_cli_used, and omitted from --help.
+    legacy = argparse.SUPPRESS
+    parser.add_argument("--hcc_h", type=int, default=None, help=legacy)
+    parser.add_argument("--hcc_dilations", type=str, default=None, help=legacy)
+    parser.add_argument("--hcc_scale_adaptive", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_separate_axis_kernels", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_gate_temperature", type=float, default=None, help=legacy)
+    parser.add_argument("--hcc_exact_cost_realization", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_closed_form_dyadic_realization", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_input_adaptive_gate", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_gate_reduction", type=int, default=None, help=legacy)
+    parser.add_argument("--hcc_M", type=int, default=None, help=legacy)
+    parser.add_argument("--hcc_axis", type=str, default=None, choices=["h", "w", "hw"], help=legacy)
+    parser.add_argument("--hcc_padding", type=str, default=None, choices=["reflect", "replicate", "zeros"], help=legacy)
+    parser.add_argument("--hcc_per_channel", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_use_center", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_pw_ratio", type=int, default=None, help=legacy)
+    parser.add_argument("--hcc_use_pw", type=str2bool, default=None, help=legacy)
+    parser.add_argument("--hcc_gate_init", type=float, default=None, help=legacy)
+    parser.add_argument("--hcc_tie_sym", type=str2bool, default=None, help=legacy)
 
     # BAM-Tuning baseline (Q1/IJCV CNN attention module adapted to frozen-backbone PEFT)
     parser.add_argument("--bam_reduction", type=int, default=16)
@@ -177,7 +191,8 @@ def get_args_parser():
     parser.add_argument("--opt_eps", default=1e-8, type=float)
     parser.add_argument("--clip_grad", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--weight_decay_hcc", type=float, default=0.0)
+    parser.add_argument("--weight_decay_dt1d", type=float, default=0.0)
+    parser.add_argument("--weight_decay_hcc", type=float, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--min_lr", type=float, default=1e-6)
     parser.add_argument("--warmup_epochs", type=int, default=0)
@@ -223,6 +238,14 @@ def get_args_parser():
     parser.add_argument("--log_dir", default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=0, type=int)
+    parser.add_argument("--split_file", default=None, type=str, help="JSON file containing exact train/val indices.")
+    parser.add_argument("--val_ratio", default=0.2, type=float)
+    parser.add_argument("--test_ratio", default=0.1, type=float, help="Independent test share for datasets without an official test split.")
+    parser.add_argument("--fake_train_size", default=24, type=int)
+    parser.add_argument("--fake_val_size", default=12, type=int)
+    parser.add_argument("--fake_test_size", default=12, type=int)
+    parser.add_argument("--fake_num_classes", default=5, type=int)
+    parser.add_argument("--deterministic", default=False, type=str2bool, help="Use deterministic PyTorch algorithms where supported.")
 
     parser.add_argument("--resume", default="")
     parser.add_argument("--auto_resume", type=str2bool, default=False)
@@ -260,11 +283,13 @@ def get_args_parser():
 
 def canonicalize_args(args):
     aliases = {
-        "dt": "hcc",
-        "1d-dt": "hcc",
-        "dt1d": "hcc",
-        "dt1d_adapter": "hcc",
-        "hcc_adapter": "hcc",
+        "dt": "dt",
+        "dt1d": "dt",
+        "dt1d-adapter": "dt",
+        "dt1d_adapter": "dt",
+        "1d-dt": "dt",
+        "hcc": "dt",
+        "hcc_adapter": "dt",
         "bam_adapter": "bam",
         "bam-tuning": "bam",
         "bam_tuning": "bam",
@@ -280,44 +305,88 @@ def canonicalize_args(args):
         "finetune_full": "full",
         "linear_probe": "linear",
     }
-    args.tuning_method = aliases.get(str(args.tuning_method).lower(), str(args.tuning_method).lower())
+    raw_method = str(args.tuning_method).lower()
+    args.tuning_method = aliases.get(raw_method, raw_method)
 
-    # Map official dt_* flags to legacy hcc_* names for compatibility.
-    if args.dt_M is not None:
-        args.hcc_M = args.dt_M
-    if args.dt_h is not None:
-        args.hcc_h = args.dt_h
-    if args.dt_dilations is not None:
-        args.hcc_dilations = args.dt_dilations
-    if args.dt_scale_adaptive is not None:
-        args.hcc_scale_adaptive = args.dt_scale_adaptive
-    if args.dt_separate_axis_kernels is not None:
-        args.hcc_separate_axis_kernels = args.dt_separate_axis_kernels
-    if args.dt_gate_temperature is not None:
-        args.hcc_gate_temperature = args.dt_gate_temperature
-    if args.dt_input_adaptive_gate is not None:
-        args.hcc_input_adaptive_gate = args.dt_input_adaptive_gate
-    if args.dt_gate_reduction is not None:
-        args.hcc_gate_reduction = args.dt_gate_reduction
-    if args.dt_axis is not None:
-        args.hcc_axis = args.dt_axis
-    if args.dt_padding is not None:
-        args.hcc_padding = args.dt_padding
-    if args.dt_pw_ratio is not None:
-        args.hcc_pw_ratio = args.dt_pw_ratio
-    if args.dt_gate_init is not None:
-        args.hcc_gate_init = args.dt_gate_init
-    if args.dt_no_pw is not None:
-        args.hcc_use_pw = not args.dt_no_pw
+    defaults = {
+        "dt_M": 1,
+        "dt_h": 1,
+        "dt_dilations": None,
+        "dt_scale_adaptive": False,
+        "dt_separate_axis_kernels": True,
+        "dt_gate_temperature": 1.0,
+        "dt_exact_cost_realization": True,
+        "dt_closed_form_dyadic_realization": True,
+        "dt_input_adaptive_gate": False,
+        "dt_gate_reduction": 4,
+        "dt_axis": "hw",
+        "dt_alpha_group": 16,
+        "dt_no_pw": False,
+        "dt_pw_ratio": 32,
+        "dt_pw_groups": 4,
+        "dt_gate_init": 0.01,
+        "dt_padding": "reflect",
+        "dt_use_bn": False,
+        "dt_tie_sym": True,
+    }
+    legacy_map = {
+        "dt_M": "hcc_M",
+        "dt_h": "hcc_h",
+        "dt_dilations": "hcc_dilations",
+        "dt_scale_adaptive": "hcc_scale_adaptive",
+        "dt_separate_axis_kernels": "hcc_separate_axis_kernels",
+        "dt_gate_temperature": "hcc_gate_temperature",
+        "dt_exact_cost_realization": "hcc_exact_cost_realization",
+        "dt_closed_form_dyadic_realization": "hcc_closed_form_dyadic_realization",
+        "dt_input_adaptive_gate": "hcc_input_adaptive_gate",
+        "dt_gate_reduction": "hcc_gate_reduction",
+        "dt_axis": "hcc_axis",
+        "dt_pw_ratio": "hcc_pw_ratio",
+        "dt_gate_init": "hcc_gate_init",
+        "dt_padding": "hcc_padding",
+        "dt_tie_sym": "hcc_tie_sym",
+    }
+    legacy_used = dict(getattr(args, "legacy_cli_used", {}))
+    canonical_provided = {name: getattr(args, name, None) is not None for name in defaults}
+    for canonical, default in defaults.items():
+        value = getattr(args, canonical, None)
+        legacy_name = legacy_map.get(canonical)
+        legacy_value = getattr(args, legacy_name, None) if legacy_name else None
+        if value is None and legacy_value is not None:
+            value = legacy_value
+            legacy_used[legacy_name] = legacy_value
+        if value is None:
+            value = default
+        setattr(args, canonical, value)
 
-    # Full FT should not freeze the backbone. All PEFT modes should freeze by default.
+    legacy_per_channel = getattr(args, "hcc_per_channel", None)
+    if legacy_per_channel is not None and not canonical_provided["dt_alpha_group"]:
+        args.dt_alpha_group = 1 if legacy_per_channel else defaults["dt_alpha_group"]
+        legacy_used["hcc_per_channel"] = legacy_per_channel
+    legacy_use_pw = getattr(args, "hcc_use_pw", None)
+    if legacy_use_pw is not None and not canonical_provided["dt_no_pw"]:
+        args.dt_no_pw = not legacy_use_pw
+        legacy_used["hcc_use_pw"] = legacy_use_pw
+    legacy_weight_decay = getattr(args, "weight_decay_hcc", None)
+    if legacy_weight_decay is not None:
+        args.weight_decay_dt1d = legacy_weight_decay
+        legacy_used["weight_decay_hcc"] = legacy_weight_decay
+
+    if raw_method in {"hcc", "hcc_adapter", "1d-dt"}:
+        legacy_used["tuning_method"] = raw_method
+    args.legacy_cli_used = legacy_used
+
+    for name in [n for n in vars(args) if n.startswith("hcc_")]:
+        delattr(args, name)
+    if hasattr(args, "weight_decay_hcc"):
+        delattr(args, "weight_decay_hcc")
+
     if args.tuning_method == "full":
         args.freeze_backbone = False
-    elif args.tuning_method in ("linear", "conv", "adapter", "hcc", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune"):
+    elif args.tuning_method in ("linear", "conv", "adapter", "dt", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune"):
         args.freeze_backbone = True
 
     return args
-
 
 def save_json_on_master(obj: Dict, path: str):
     if utils.is_main_process():
@@ -530,7 +599,7 @@ def _attach_hook_adapters(model_backbone: nn.Module, args, make_adapter):
         module.add_module("pet_adapter", make_adapter(out_ch))
 
         def hook(mod, inputs, out):
-            if getattr(mod.pet_adapter, "is_hcc_adapter", False):
+            if getattr(mod.pet_adapter, "is_dt1d_adapter", False):
                 return mod.pet_adapter(out)
             if getattr(mod.pet_adapter, "is_bam_adapter", False):
                 return mod.pet_adapter(out)
@@ -602,34 +671,36 @@ def _add_adapters(model_backbone: nn.Module, args):
 
         _attach_hook_adapters(model_backbone, args, lambda ch: ConvAdapter(ch))
 
-    elif method == "hcc":
-        from models.hcc_adapter import HCCAdapter
+    elif method == "dt":
+        from models.dt1d_adapter import DT1DAdapter
 
         def make_adapter(ch):
-            m = HCCAdapter(
+            m = DT1DAdapter(
                 C=ch,
-                M=args.hcc_M,
-                h=args.hcc_h,
-                dilations=args.hcc_dilations,
-                scale_adaptive=args.hcc_scale_adaptive,
-                separate_axis_kernels=args.hcc_separate_axis_kernels,
-                gate_temperature=args.hcc_gate_temperature,
-                input_adaptive_gate=args.hcc_input_adaptive_gate,
-                gate_reduction=args.hcc_gate_reduction,
-                axis=args.hcc_axis,
+                M=args.dt_M,
+                h=args.dt_h,
+                dilations=args.dt_dilations,
+                scale_adaptive=args.dt_scale_adaptive,
+                separate_axis_kernels=args.dt_separate_axis_kernels,
+                gate_temperature=args.dt_gate_temperature,
+                exact_cost_realization=args.dt_exact_cost_realization,
+                closed_form_dyadic_realization=args.dt_closed_form_dyadic_realization,
+                input_adaptive_gate=args.dt_input_adaptive_gate,
+                gate_reduction=args.dt_gate_reduction,
+                axis=args.dt_axis,
                 alpha_group=args.dt_alpha_group,
-                per_channel=args.hcc_per_channel,
-                tie_sym=args.hcc_tie_sym,
-                use_pw=args.hcc_use_pw,
-                no_pw=not args.hcc_use_pw,
-                pw_ratio=args.hcc_pw_ratio,
+                per_channel=False,
+                tie_sym=args.dt_tie_sym,
+                use_pw=not args.dt_no_pw,
+                no_pw=not not args.dt_no_pw,
+                pw_ratio=args.dt_pw_ratio,
                 pw_groups=args.dt_pw_groups,
                 use_bn=args.dt_use_bn,
                 residual_scale=args.adapt_scale,
-                gate_init=args.hcc_gate_init,
-                padding_mode=args.hcc_padding,
+                gate_init=args.dt_gate_init,
+                padding_mode=args.dt_padding,
             )
-            m.is_hcc_adapter = True
+            m.is_dt1d_adapter = True
             return m
 
         _attach_hook_adapters(model_backbone, args, make_adapter)
@@ -759,7 +830,7 @@ def set_trainability_policy(model: nn.Module, args, extra_adapter_param_ids: Opt
         return model
 
     # PEFT: adapters and task head only.
-    tokens = ("pet_adapter", "hcc", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side", "lora_down", "lora_up")
+    tokens = ("pet_adapter", "dt1d", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side", "lora_down", "lora_up")
     for name, p in model.named_parameters():
         if _is_head_param(name) or any(tok in name for tok in tokens) or id(p) in extra_adapter_param_ids:
             p.requires_grad = True
@@ -796,7 +867,7 @@ def build_samplers(args, dataset_train, dataset_val, dataset_test):
     if getattr(args, "distributed", False):
         sampler_train = torch.utils.data.DistributedSampler(dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True, seed=args.seed)
     else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        sampler_train = torch.utils.data.RandomSampler(dataset_train, generator=torch.Generator().manual_seed(args.seed))
 
     def eval_sampler(ds):
         if ds is None:
@@ -815,7 +886,7 @@ def build_model_for_experiment(args, clip_visual=None, clip_feat_dim=None):
         model = CLIPLinearProbe(clip_visual, int(clip_feat_dim), args.nb_classes, freeze_backbone=bool(args.freeze_backbone))
         return model, set()
 
-    tv_methods = ("full", "linear", "conv", "adapter", "hcc", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune")
+    tv_methods = ("full", "linear", "conv", "adapter", "dt", "bam", "residual", "ssf", "lora_conv", "bitfit", "sidetune")
     if args.tuning_method in tv_methods:
         model_backbone = _build_torchvision_or_hub_backbone(args)
         if args.tuning_method == "sidetune":
@@ -865,9 +936,18 @@ def main(args):
     print(f"[Info] Using device: {device}  (AMP={'on' if args.use_amp else 'off'})")
 
     seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
+    random.seed(seed)
     np.random.seed(seed)
-    cudnn.benchmark = device.type == "cuda"
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+    else:
+        cudnn.benchmark = device.type == "cuda"
+        cudnn.deterministic = False
 
     clip_preprocess = None
     clip_visual = None
@@ -924,6 +1004,14 @@ def main(args):
         log_writer = None
 
     drop_last = len(dataset_train) >= args.batch_size
+
+    def seed_worker(worker_id):
+        worker_seed = (args.seed + worker_id + 1000 * utils.get_rank()) % (2**32)
+        random.seed(worker_seed)
+        np.random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
+    loader_generator = torch.Generator().manual_seed(args.seed + utils.get_rank())
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
         sampler=sampler_train,
@@ -931,6 +1019,8 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
         drop_last=drop_last,
+        worker_init_fn=seed_worker,
+        generator=loader_generator,
     )
     data_loader_val = None
     if dataset_val is not None:
@@ -941,6 +1031,7 @@ def main(args):
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
+            worker_init_fn=seed_worker,
         )
     data_loader_test = None
     if dataset_test is not None:
@@ -951,11 +1042,14 @@ def main(args):
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=False,
+            worker_init_fn=seed_worker,
         )
 
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0.0 or args.cutmix_minmax is not None
     if mixup_active:
+        if Mixup is None:
+            raise RuntimeError("timm is required when mixup or cutmix is enabled. Install requirements.txt.")
         print("Mixup is activated!")
         mixup_fn = Mixup(
             mixup_alpha=args.mixup,
@@ -1022,6 +1116,8 @@ def main(args):
 
     model_ema = None
     if args.model_ema:
+        if ModelEma is None:
+            raise RuntimeError("timm is required when --model_ema True.")
         model_ema = ModelEma(model, decay=args.model_ema_decay, device="cpu" if args.model_ema_force_cpu else "", resume="")
         print(f"Using EMA with decay = {args.model_ema_decay:.8f}")
 
@@ -1042,18 +1138,18 @@ def main(args):
     print(f"Number of training examples = {len(dataset_train)}")
     print(f"Number of training steps per epoch = {num_training_steps_per_epoch}")
 
-    # Optimizer param groups: adapter-like params get weight_decay_hcc.
+    # Optimizer param groups: adapter-like params get weight_decay_dt1d.
     adapter_like, other = [], []
     for name, p in model_without_ddp.named_parameters():
         if not p.requires_grad:
             continue
-        is_adapter_like = any(tok in name for tok in ("pet_adapter", "hcc", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side")) or id(p) in adapter_param_ids
+        is_adapter_like = any(tok in name for tok in ("pet_adapter", "dt1d", "bam", "alpha", "gate", "ssf", "lora", "adapter", "side")) or id(p) in adapter_param_ids
         (adapter_like if is_adapter_like else other).append(p)
     print(f"[ParamGroups] adapter_like={sum(p.numel() for p in adapter_like):,} others={sum(p.numel() for p in other):,}")
 
     optimizer = torch.optim.AdamW(
         [
-            {"params": adapter_like, "lr": args.lr, "weight_decay": args.weight_decay_hcc},
+            {"params": adapter_like, "lr": args.lr, "weight_decay": args.weight_decay_dt1d},
             {"params": other, "lr": args.lr, "weight_decay": args.weight_decay},
         ],
         betas=(0.9, 0.999),
@@ -1076,6 +1172,8 @@ def main(args):
     if mixup_fn is not None:
         criterion = SoftTargetCrossEntropy()
     elif args.smoothing > 0.0:
+        if LabelSmoothingCrossEntropy is None:
+            raise RuntimeError("timm is required when label smoothing is enabled.")
         criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
     else:
         criterion = torch.nn.CrossEntropyLoss()

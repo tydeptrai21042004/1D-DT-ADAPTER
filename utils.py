@@ -5,7 +5,12 @@ import json
 from collections import defaultdict, deque
 import datetime
 import numpy as np
-from timm.utils import get_state_dict
+try:
+    from timm.utils import get_state_dict
+except ImportError:
+    def get_state_dict(model_ema):
+        target = getattr(model_ema, "ema", model_ema)
+        return target.state_dict()
 
 from pathlib import Path
 

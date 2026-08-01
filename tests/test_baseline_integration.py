@@ -21,7 +21,7 @@ from models.tuning_modules.lora_conv import LoRAConv2d
 from models.tuning_modules.residual_adapter import ParallelResidualAdapter, SeriesResidualAdapter
 from models.tuning_modules.side_tuning import SideTuningClassifier
 from models.tuning_modules.ssf import SSF
-from models.hcc_adapter import DT1DAdapter
+from models.dt1d_adapter import DT1DAdapter
 
 
 METHODS = [

@@ -1,257 +1,173 @@
+# DT1D-Adapter — CNN Three-Seed Reproducibility Release
 
-# 1D-DT-Adapter (1D Dilated-Tap Adapter)
+This repository is the **CNN-only** experimental package for DT1D-Adapter. New paper runs use the canonical implementation `models/dt1d_adapter.py`, class `DT1DAdapter`, CLI method `--tuning_method dt`, and `--dt_*` arguments. `models/hcc_adapter.py` is retained only as a compatibility shim for older checkpoints.
 
-Parameter-efficient fine-tuning (PEFT) for vision backbones using a lightweight **1D-DT Adapter** (implemented in `models/hcc_adapter.py`).
+## What changed in v0.8.0
 
-This project keeps the Conv-Adapter training pipeline and adds a **1D dilated-tap, even-symmetric axial spatial adapter** with:
-- group-shared coefficients,
-- optional grouped `1×1` bottleneck channel mixing,
-- and a safe residual gate for stable initialization.
+- Every stochastic CNN classification table can be run with **three independent seeds: 0, 1, and 2**.
+- **Full fine-tuning** and **Linear probing** are executable baselines and are included in every comparison target.
+- One versioned manifest maps manuscript tables and figures to datasets, CNN backbones, epochs, batch sizes, methods, and seeds.
+- **408 portable per-run YAML configurations** are committed for all selected target/method/seed combinations.
+- Every run records its resolved YAML, exact command, seed, split manifest, Git revision, environment, pretrained weights, logs, metrics, and status.
+- Aggregation exports raw runs and `mean ± standard deviation` summaries in CSV, JSON, and LaTeX formats.
+- Figure 1 and Figure 4 are regenerated from three-seed outputs. Figures 2 and 3 are deterministic and do not require training seeds.
+- ViT, Swin, Transformer, and token-prompt experiments are rejected by the CNN paper runner.
 
----
+## Supported manuscript targets
 
-## Highlights
+| Target | Dataset / CNN backbone | Protocol |
+|---|---|---|
+| Table 2 | DTD / ResNet-18 | 9 DT1D ablations × seeds 0,1,2 |
+| Tables 3–4 | DTD or Flowers102 / ResNet-50 | 100 epochs × 3 seeds |
+| Tables 5–7 | Flowers102 / ResNet-18 | 10 or 100 epochs × 3 seeds |
+| Tables 8–9 | SVHN or Oxford-IIIT Pet / ResNet-50 | 10 epochs × 3 seeds |
+| Tables 10–13 | Food-101 or Oxford-IIIT Pet / ResNet-18 or EfficientNet-B0 | 10 or 100 epochs × 3 seeds |
+| Tables 14–15 | Caltech101 / ResNet-18 | accuracy and efficiency × 3 seeds |
+| Tables 18–19 | EuroSAT / MobileNetV3-Small | accuracy and efficiency × 3 seeds |
+| Figure 1 | Caltech101 / ResNet-18 / DT1D | mean convergence curve with ±1 std band |
+| Figure 4 | FGVC-Aircraft / ResNet-18 | mean test accuracy ±1 std versus parameter count |
 
-- ✅ Lightweight PEFT adapter for vision backbones
-- ✅ Axial depthwise 1D filtering (`h`, `w`, or `hw`) with dilation
-- ✅ Even-symmetric taps (parameter-efficient, low-distortion intuition)
-- ✅ Group-shared coefficients for low parameter count
-- ✅ Optional grouped `1×1` bottleneck for channel mixing
-- ✅ Residual gate initialization for stable training
-- ✅ Compatible with existing `main.py` training pipeline
-
----
-
-## Repository structure
-
-```text
-tydeptrai21042004-1d-dt-adapter/
-├── main.py                 # entry point (CLI)
-├── engine.py               # training/evaluation loops
-├── utils.py                # logging, schedulers, misc utilities
-├── memory_utils.py         # memory helpers
-├── datasets/               # dataset builders & transforms
-│   ├── build.py
-│   ├── fewshot.py
-│   ├── fgvc.py
-│   ├── vdd.py
-│   └── vtab.py
-└── models/
-    ├── hcc_adapter.py      # 1D-DT adapter module (depthwise 1D dilated taps + optional PW)
-    ├── backbones/          # resnet / convnext / swin / efficientnet / clip
-    ├── heads/              # linear / mlp classifier heads
-    ├── layers/             # extra layers
-    └── tuning_modules/     # conv/residual adapters + side-tuning modules
-````
-
-> **Note:** The file is currently named `hcc_adapter.py` (legacy naming), while the method is referred to as **1D-DT Adapter / DT1D-Adapter** in the manuscript.
-
----
-
-## Method overview (short)
-
-Given a feature map `x ∈ R^{B×C×H×W}`, the **1D-DT adapter** builds a residual update:
-
-* **Axial depthwise 1D dilated taps** along height/width (`axis ∈ {h,w,hw}`), kernel `K = 2M + 1`
-* **Even symmetry**: taps at `±m` share the same coefficient
-* **Group-shared coefficients**: channels share α within groups (`alpha_group`)
-* **Optional grouped 1×1 bottleneck** (`pw_ratio`, `pw_groups`) for lightweight channel mixing
-* **Residual gate** (`gate_init`) keeps the adapter near identity at initialization
-
-Update rule:
-
-```text
-out = x + residual_scale * gate * adapter(x)
-```
-
-
+The experimental matrix is defined in [`configs/paper/cnn_three_seed_manifest.yaml`](configs/paper/cnn_three_seed_manifest.yaml).
 
 ## Installation
 
 ```bash
-pip install torch torchvision timm
+python -m pip install -r requirements.txt
 ```
 
-Optional (if using TensorBoard / distributed utilities):
+or:
 
 ```bash
-pip install tensorboard
+conda env create -f environment.yml
+conda activate dt1d-adapter-0.8.0
 ```
 
----
+## Run one table
 
-## Dataset preparation
+```bash
+DATA_DIR=/path/to/data \
+DEVICE=cuda \
+SEEDS=0,1,2 \
+bash scripts/tables/table_14_15_three_seed.sh
+```
 
-This repo expects datasets under:
+Other table entry points are in `scripts/tables/`.
+
+## Run a target directly
+
+```bash
+python tools/run_cnn_paper.py \
+  --target table_03 \
+  --seeds 0,1,2 \
+  --data-path /path/to/data \
+  --device cuda \
+  --skip-if-complete
+
+python tools/aggregate_cnn_paper.py \
+  --root outputs/cnn_paper_three_seed \
+  --target table_03 \
+  --require-seeds 0,1,2
+```
+
+Use the table's publication method list with `--methods target`. To run every implemented CNN method instead:
+
+```bash
+python tools/run_cnn_paper.py \
+  --target table_03 \
+  --methods all-cnn \
+  --seeds 0,1,2 \
+  --data-path /path/to/data \
+  --device cuda
+```
+
+## Full fine-tuning and Linear probing
+
+Both methods use the same backbone, pretrained weights, data split, augmentation, optimizer family, epoch count, and seed as DT1D and the other baselines.
+
+```bash
+python tools/run_cnn_paper.py \
+  --target table_14_15 \
+  --methods full,linear \
+  --seeds 0,1,2 \
+  --data-path /path/to/data \
+  --device cuda
+```
+
+- `full`: every backbone and classifier parameter is trainable.
+- `linear`: only the replaced task classifier is trainable; the feature extractor and BatchNorm statistics are frozen.
+
+## Figures
+
+```bash
+bash scripts/figures/figure_01_three_seed.sh
+bash scripts/figures/figure_02_deterministic.sh
+bash scripts/figures/figure_03_deterministic.sh
+bash scripts/figures/figure_04_three_seed.sh
+```
+
+## Seed policy
+
+For a fixed seed, all methods receive the same split and data-loader order. Seeds 0, 1, and 2 independently control Python, NumPy, PyTorch, CUDA, samplers, workers, model initialization, and generated validation splits. Datasets with official train/validation/test partitions retain their official partitions. Committed Caltech101 split files are provided for all three seeds.
+
+## Output structure
 
 ```text
-./data/<dataset_name>
+outputs/cnn_paper_three_seed/
+  table_14_15/
+    caltech101/resnet18/
+      dt1d/seed_0/
+      dt1d/seed_1/
+      dt1d/seed_2/
+      full/seed_0/...
+      linear/seed_0/...
+  aggregated/table_14_15/
+    raw_runs.csv
+    mean_std_numeric.csv
+    mean_std_pretty.csv
+    manuscript_compact.csv
+    manuscript_compact.tex
+    seed_completeness.json
 ```
 
-Examples:
+Each run directory contains `args.json`, `resolved_config.json`, `command.sh`, `environment.json`, `run_metadata.json`, `run_status.json`, `stdout.log`, `history.json`, `convergence_summary.json`, `test_summary.json`, and efficiency output when profiling is enabled.
 
-```text
-./data/cifar10
-./data/cifar100
-./data/pets
-./data/flowers
-```
+## Kaggle
 
-You can also pass a custom path via `--data_path`.
-
----
-
-## How to run
-
-All experiments are launched through **`main.py`**.
-
-### Main flags
-
-#### Dataset
-
-* `--dataset <name>`
-* `--data_path <path>`
-* `--nb_classes <int>`
-
-#### Backbone
-
-* `--backbone <model_name>`
-* `--weights <torchvision_weight_enum_or_none>` (optional)
-* `--input_size <int>` (e.g., 224)
-* `--imagenet_default_mean_and_std True|False`
-
-#### Tuning method
-
-* `--tuning_method dt`  (1D-DT adapter)
-* Other methods may be available in `models/tuning_modules/` (e.g., `conv`, `residual`, `side`, ...)
-
-#### 1D-DT adapter hyperparameters
-
-* `--dt_h`
-* `--dt_M`
-* `--dt_axis` (`h`, `w`, `hw`)
-* `--dt_per_channel` (legacy) / `--dt_alpha_group`
-* `--dt_no_pw`
-* `--dt_pw_ratio`
-* `--dt_pw_groups`
-* `--dt_gate_init`
-* `--dt_padding`
-* global: `--adapt_scale`
-
-> If your CLI still uses `--hcc_*` flag names, keep using them (legacy naming is supported in some versions).
-
----
-
-## Quick start examples
-
-### 1) CIFAR-10 + ResNet-18
+Push branch `dt1d-v8-cnn-three-seed`, enable Internet and a GPU, then use [`KAGGLE_CNN_THREE_SEED_RUN.sh`](KAGGLE_CNN_THREE_SEED_RUN.sh). Select a target at the top of the cell:
 
 ```bash
-python main.py \
-  --dataset cifar10 --data_path ./data/cifar10 --nb_classes 10 \
-  --backbone resnet18 \
-  --tuning_method dt \
-  --dt_h 1 --dt_M 2 --dt_axis hw \
-  --dt_per_channel True \
-  --dt_pw_ratio 8 --dt_gate_init 0.0 \
-  --dt_padding reflect --adapt_scale 1.0 \
-  --batch_size 128 --epochs 200 --lr 1e-3 \
-  --dist_eval False
+BRANCH="dt1d-v8-cnn-three-seed"
+TARGET="table_14_15"
+SEEDS="0,1,2"
 ```
 
-### 2) CIFAR-100 + ResNet-50 (ImageNet pretrained)
+## Validation
 
 ```bash
-python main.py \
-  --dataset cifar100 --data_path ./data/cifar100 --nb_classes 100 \
-  --backbone resnet50 --weights ResNet50_Weights.IMAGENET1K_V2 \
-  --tuning_method dt \
-  --input_size 224 --imagenet_default_mean_and_std True \
-  --dt_h 1 --dt_M 2 --dt_axis hw \
-  --dt_alpha_group 16 --dt_pw_ratio 32 --dt_gate_init 0.1 \
-  --dt_padding reflect --adapt_scale 1.0 \
-  --batch_size 64 --epochs 50 --lr 1e-4 \
-  --dist_eval False
+python tools/verify_reproducibility_package.py
+python tools/preflight_cnn_matrix.py --target all
+python -m compileall -q main.py engine.py datasets models tools tests
+pytest -q
 ```
 
-### 3) CPU sanity run
+A no-download CPU smoke run is also available:
 
 ```bash
-python main.py \
-  --device cpu \
-  --dataset cifar10 --data_path ./data/cifar10 --nb_classes 10 \
-  --backbone resnet18 \
-  --tuning_method dt \
-  --dt_h 1 --dt_M 2 --dt_axis hw \
-  --batch_size 64 --epochs 5 --lr 1e-3 \
-  --dist_eval False
+python tools/run_cnn_paper.py \
+  --target table_14_15 \
+  --methods dt1d,full,linear \
+  --seeds 0 \
+  --smoke \
+  --output-root /tmp/dt1d-smoke
 ```
 
----
+## Release
 
-## Outputs / logs
+Prepared branch: `dt1d-v8-cnn-three-seed`  
+Prepared tag: `v0.8.0`
 
-Typical runs create:
+See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`MANUSCRIPT_TO_CODE.md`](MANUSCRIPT_TO_CODE.md), [`MANUSCRIPT_ALIGNMENT_NOTES.md`](MANUSCRIPT_ALIGNMENT_NOTES.md), and [`PRETRAINED_WEIGHTS.md`](PRETRAINED_WEIGHTS.md).
 
-* a results/log directory (configured in `main.py` / `utils.py`)
-* checkpoints (if enabled)
-* training logs (stdout and optional TensorBoard files)
+## License
 
----
-
-## Reproducibility notes
-
-For reproducible experiments, please record:
-
-* exact commit hash
-* PyTorch / torchvision / timm versions
-* GPU/CPU info
-* random seed(s)
-* dataset split protocol
-* full CLI command
-
-Recommended additions for the repo:
-
-* `requirements.txt` or `environment.yml`
-* `scripts/` with exact commands used in the paper
-* `CITATION.cff`
-* Zenodo archive release (optional, for permanent software DOI)
-
----
-
-## Tips & gotchas
-
-* **Backbone freezing:** In PEFT, backbone parameters are typically frozen while only adapter/head parameters are trained.
-* **BatchNorm freezing:** When the backbone is frozen, BatchNorm should usually be kept in `eval()` mode.
-* **Input size matters:**
-
-  * CIFAR: often `32×32`
-  * ImageNet-pretrained backbones: usually `224×224` + ImageNet mean/std
-* **Hyperparameter sensitivity:** `dt_M`, `dt_h`, `dt_alpha_group`, and `dt_pw_ratio` affect the accuracy/parameter trade-off.
-
----
-
-## Citation
-
-If you use this repository, please cite the associated manuscript:
-
-
-### Baseline / training pipeline inspiration (Conv-Adapter)
-
-```bibtex
-@inproceedings{chen2024convadapter,
-  title={Conv-Adapter: Exploring Parameter Efficient Transfer Learning for ConvNets},
-  author={Chen, Wei and Gao, Peng and Zhang, Xiaoyu and others},
-  booktitle={CVPR Workshops},
-  year={2024}
-}
-```
-
----
-
-## Maintainers
-
-* **Tran Kim Huong**
-* **Dang Ba Ty**
-
-
+Apache License 2.0. See [`LICENSE`](LICENSE).

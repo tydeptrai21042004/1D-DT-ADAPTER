@@ -13,7 +13,8 @@ import unittest
 import torch
 import torch.nn as nn
 
-from models.hcc_adapter import DT1DAdapter, HCCAdapter
+from models.dt1d_adapter import DT1DAdapter
+from models.hcc_adapter import HCCAdapter
 from models.tuning_modules.bam_adapter import BAMAdapter
 from models.tuning_modules.lora_conv import LoRAConv2d, apply_lora_conv2d
 from models.tuning_modules.residual_adapter import ParallelResidualAdapter

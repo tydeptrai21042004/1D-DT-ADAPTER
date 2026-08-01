@@ -52,7 +52,7 @@ def main():
             "--dataset", args.dataset,
             "--data_path", args.data_path,
             "--backbone", args.backbone,
-            "--tuning_method", "hcc",
+            "--tuning_method", "dt",
             "--epochs", str(args.epochs),
             "--batch_size", str(args.batch_size),
             "--device", args.device,

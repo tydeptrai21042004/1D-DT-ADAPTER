@@ -14,11 +14,28 @@ from __future__ import annotations
 import math
 import time
 from contextlib import nullcontext
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import torch
-from timm.data import Mixup
-from timm.utils import ModelEma, accuracy
+
+try:
+    from timm.data import Mixup
+    from timm.utils import ModelEma, accuracy
+except ImportError:  # package/source tests can run before optional training deps
+    Mixup = Any
+    ModelEma = Any
+
+    def accuracy(output: torch.Tensor, target: torch.Tensor, topk=(1,)):
+        maxk = min(max(topk), output.shape[1])
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+        result = []
+        for k in topk:
+            kk = min(k, output.shape[1])
+            correct_k = correct[:kk].reshape(-1).float().sum(0)
+            result.append(correct_k.mul_(100.0 / target.shape[0]))
+        return result
 
 import utils
 

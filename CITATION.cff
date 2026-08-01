@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use DT1D-Adapter, cite the associated paper and this software release."
+title: "DT1D-Adapter: CNN Three-Seed Reproducibility Package"
+type: software
+authors:
+  - family-names: "Tran"
+    given-names: "Kim Huong"
+    orcid: "https://orcid.org/0009-0006-3211-4274"
+  - family-names: "Dang"
+    given-names: "Ba Ty"
+    orcid: "https://orcid.org/0009-0007-3223-0248"
+repository-code: "https://github.com/tydeptrai21042004/1D-DT-ADAPTER"
+url: "https://github.com/tydeptrai21042004/1D-DT-ADAPTER"
+version: "0.8.0"
+date-released: "2026-08-01"
+license: "Apache-2.0"
+keywords:
+  - parameter-efficient fine-tuning
+  - convolutional neural networks
+  - computer vision
+  - adapters
+  - reproducibility
