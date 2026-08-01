@@ -1,0 +1,49 @@
+schema_version: 2
+experiment_id: table_14_15_lora_conv_seed1
+target: table_14_15
+kind: comparison
+manuscript_tables:
+- 14
+- 15
+manuscript_figures: []
+method_preset: lora_conv
+method_label: LoRA-Conv
+variant: null
+independent_seed: 1
+description: Three-independent-seed execution matrix for every CNN classification
+  table and result-driven figure in the manuscript. Transformer/ViT experiments are
+  intentionally excluded. Full fine-tuning and Linear probing are included in every
+  comparison table.
+args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.1
+  dataset: caltech101
+  backbone: resnet18
+  epochs: 10
+  batch_size: 64
+  test_ratio: 0.1
+  tuning_method: lora_conv
+  freeze_backbone: true
+  lora_r: 8
+  lora_alpha: 16.0
+  lora_target: all
+  seed: 1
+  split_file: splits/caltech101/seed1_holdout20.json
