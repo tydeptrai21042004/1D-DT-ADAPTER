@@ -1,0 +1,60 @@
+schema_version: 2
+experiment_id: table_02_dt1d__full_dt1d_seed1
+target: table_02
+kind: ablation
+manuscript_tables:
+- 2
+manuscript_figures: []
+method_preset: dt1d
+method_label: DT1D-Adapter
+variant: full_dt1d
+independent_seed: 1
+description: Three-independent-seed execution matrix for every CNN classification
+  table and result-driven figure in the manuscript. Transformer/ViT experiments are
+  intentionally excluded. Full fine-tuning and Linear probing are included in every
+  comparison table.
+args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.2
+  dataset: dtd
+  backbone: resnet18
+  epochs: 10
+  batch_size: 64
+  tuning_method: dt
+  freeze_backbone: true
+  dt_M: 2
+  dt_h: 1
+  dt_dilations: 1,2,4
+  dt_scale_adaptive: true
+  dt_separate_axis_kernels: true
+  dt_gate_temperature: 1.0
+  dt_exact_cost_realization: true
+  dt_closed_form_dyadic_realization: true
+  dt_input_adaptive_gate: false
+  dt_axis: hw
+  dt_alpha_group: 16
+  dt_no_pw: false
+  dt_pw_ratio: 32
+  dt_pw_groups: 4
+  dt_gate_init: 0.01
+  dt_padding: reflect
+  adapt_scale: 1.0
+  seed: 1

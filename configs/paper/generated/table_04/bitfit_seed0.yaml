@@ -1,0 +1,44 @@
+schema_version: 2
+experiment_id: table_04_bitfit_seed0
+target: table_04
+kind: comparison
+manuscript_tables:
+- 4
+manuscript_figures: []
+method_preset: bitfit
+method_label: BitFit
+variant: null
+independent_seed: 0
+description: Three-independent-seed execution matrix for every CNN classification
+  table and result-driven figure in the manuscript. Transformer/ViT experiments are
+  intentionally excluded. Full fine-tuning and Linear probing are included in every
+  comparison table.
+args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.2
+  dataset: flowers102
+  backbone: resnet50
+  epochs: 100
+  batch_size: 128
+  tuning_method: bitfit
+  freeze_backbone: true
+  bitfit_train_head: true
+  seed: 0
