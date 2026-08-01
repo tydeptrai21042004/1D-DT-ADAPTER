@@ -3,8 +3,6 @@
 import torch
 import torch.nn as nn
 
-from .backbones import *           # resnet50, ...
-from .heads import *               # LinearHead
 from .tuning_modules import set_tuning_config
 from .layers.ws_conv import WSConv2d
 
@@ -41,7 +39,12 @@ def _normalize_tuning_method(tuning_method: str) -> str:
         "conv-adapter": "conv_adapt",
         "conv_adapter": "conv_adapt",
 
-        "hcc_adapter": "hcc",
+        "dt": "dt",
+        "dt1d": "dt",
+        "dt1d_adapter": "dt",
+        "dt1d-adapter": "dt",
+        "hcc": "dt",
+        "hcc_adapter": "dt",
 
         "residual_adapter": "residual",
         "residual_adapters": "residual",
@@ -80,7 +83,12 @@ def build_model(model_name, pretrained=True, num_classes=1000, input_size=224,
 
     # 1) Build the base backbone
     tuning_config = _safe_tuning_config(tm, args)
-    base = eval(model_name)(
+    from . import backbones as backbones_module
+    from .heads import LinearHead
+    if not hasattr(backbones_module, model_name):
+        raise ValueError(f"Unknown custom backbone: {model_name}")
+    constructor = getattr(backbones_module, model_name)
+    base = constructor(
         pretrained=pretrained,
         tuning_config=tuning_config,
         input_resolution=input_size,

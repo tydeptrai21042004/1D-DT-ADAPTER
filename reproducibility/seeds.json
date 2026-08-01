@@ -1,0 +1,22 @@
+{
+  "schema_version": 2,
+  "official_independent_seeds": [0, 1, 2],
+  "aggregation": {
+    "center": "arithmetic mean",
+    "dispersion": "sample standard deviation",
+    "ddof": 1,
+    "minimum_required_runs": 3
+  },
+  "paired_comparison_rule": "For a fixed target and seed, every method uses the same dataset partition and data-order seed.",
+  "rng_sources": [
+    "python.random",
+    "numpy",
+    "torch CPU",
+    "torch CUDA",
+    "sampler",
+    "DataLoader workers",
+    "model initialization",
+    "augmentation",
+    "generated train/validation split"
+  ]
+}

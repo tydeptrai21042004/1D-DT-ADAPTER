@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "source": "Submitted manuscript Tables 14-15",
+  "table_14": {
+    "best_validation_accuracy_percent": 90.02,
+    "best_epoch_zero_based": 8,
+    "test_top1_percent": 88.98,
+    "test_top5_percent": 97.93,
+    "test_loss": 0.718
+  },
+  "table_15": {
+    "trainable_parameters": 64317,
+    "total_parameters": 11240829,
+    "flops_gmacs": 1.843,
+    "latency_ms_per_image": 2.099,
+    "fps": 476.31,
+    "mean_epoch_time_seconds": 31.75,
+    "total_training_time_seconds": 349.93
+  },
+  "timing_caveat": "Latency, FPS, and wall-clock training time are hardware and software environment dependent."
+}

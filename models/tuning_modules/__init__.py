@@ -19,10 +19,12 @@ def set_tuning_config(tuning_method, args):
         "conv": "conv_adapt",
         "conv-adapter": "conv_adapt",
         "conv_adapter": "conv_adapt",
-        "hcc_adapter": "hcc",
-        "dt": "hcc",
-        "dt1d": "hcc",
-        "dt1d_adapter": "hcc",
+        "dt": "dt",
+        "dt1d": "dt",
+        "dt1d_adapter": "dt",
+        "dt1d-adapter": "dt",
+        "hcc": "dt",
+        "hcc_adapter": "dt",
         "bam_adapter": "bam",
         "bam-tuning": "bam",
         "bam_tuning": "bam",
@@ -51,21 +53,20 @@ def set_tuning_config(tuning_method, args):
     if tm in ("full", "linear", "norm", "repnet", "repnet_bias", "bias", "bitfit"):
         return {"method": tm}
 
-    if tm == "hcc":
+    if tm == "dt":
         return {
-            "method": "hcc",
-            "M": getattr(args, "hcc_M", 1),
-            "h": getattr(args, "hcc_h", 1),
-            "axis": getattr(args, "hcc_axis", "hw"),
+            "method": "dt",
+            "M": getattr(args, "dt_M", 1),
+            "h": getattr(args, "dt_h", 1),
+            "axis": getattr(args, "dt_axis", "hw"),
             "alpha_group": getattr(args, "dt_alpha_group", 16),
-            "per_channel": getattr(args, "hcc_per_channel", False),
-            "tie_sym": getattr(args, "hcc_tie_sym", True),
-            "use_pw": getattr(args, "hcc_use_pw", True),
-            "pw_ratio": getattr(args, "hcc_pw_ratio", 8),
+            "tie_sym": getattr(args, "dt_tie_sym", True),
+            "no_pw": getattr(args, "dt_no_pw", False),
+            "pw_ratio": getattr(args, "dt_pw_ratio", 32),
             "pw_groups": getattr(args, "dt_pw_groups", 4),
             "residual_scale": getattr(args, "adapt_scale", 1.0),
-            "gate_init": getattr(args, "hcc_gate_init", 0.0),
-            "padding_mode": getattr(args, "hcc_padding", "reflect"),
+            "gate_init": getattr(args, "dt_gate_init", 0.01),
+            "padding_mode": getattr(args, "dt_padding", "reflect"),
         }
 
     if tm == "bam":
