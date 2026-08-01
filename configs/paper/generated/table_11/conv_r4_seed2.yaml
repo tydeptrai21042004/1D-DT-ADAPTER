@@ -1,0 +1,46 @@
+schema_version: 2
+experiment_id: table_11_conv_r4_seed2
+target: table_11
+kind: comparison
+manuscript_tables:
+- 11
+manuscript_figures: []
+method_preset: conv_r4
+method_label: Conv-Adapter (r=4)
+variant: null
+independent_seed: 2
+description: Three-independent-seed execution matrix for every CNN classification
+  table and result-driven figure in the manuscript. Transformer/ViT experiments are
+  intentionally excluded. Full fine-tuning and Linear probing are included in every
+  comparison table.
+args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.2
+  dataset: food101
+  backbone: efficientnet_b0
+  epochs: 10
+  batch_size: 64
+  tuning_method: conv
+  freeze_backbone: true
+  adapt_size: 4
+  kernel_size: 3
+  adapt_scale: 1.0
+  seed: 2
