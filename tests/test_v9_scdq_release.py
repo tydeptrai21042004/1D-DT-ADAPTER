@@ -14,13 +14,18 @@ import main as training
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_main_manifest_uses_final_scdq_configuration():
+def test_main_manifest_uses_final_hosq_configuration():
     manifest = yaml.safe_load((ROOT / "configs/paper/cnn_three_seed_manifest.yaml").read_text())
     preset = manifest["method_presets"]["dt1d"]
     args = preset["args"]
-    assert preset["label"] == "SCDQ-DT1D-Adapter"
-    assert args["dt_minimal_quotient_realization"] is True
-    assert args["dt_quotient_support_cap"] == 4
+    assert preset["label"] == "HOSQ-DT1D-Adapter"
+    assert args["dt_hosq_realization"] is True
+    assert args["dt_minimal_quotient_realization"] is False
+    assert args["dt_quotient_support_cap"] == 8
+    assert args["dt_hosq_subgroup_size"] == 8
+    assert args["dt_hosq_rank4"] == 1
+    assert args["dt_hosq_rank8"] == 2
+    assert args["dt_alpha_group"] == 32
     assert args["dt_no_pw"] is True
     assert args["dt_padding"] == "reflect"
     assert args["dt_exact_cost_realization"] is False
@@ -35,6 +40,19 @@ def test_scdq_ablation_manifest_has_thirteen_three_seed_variants():
     assert "legacy_v8_reflect_pointwise" in target["variants"]
     assert "mlq8_replicate_pointwise" in target["variants"]
 
+
+
+def test_hosq_ablation_manifest_has_four_settings_and_eight_variants():
+    manifest = yaml.safe_load((ROOT / "configs/experiments/hosq_three_seed_manifest.yaml").read_text())
+    assert manifest["default_seeds"] == [0, 1, 2]
+    assert set(manifest["targets"]) == {
+        "hosq_caltech101_resnet18", "hosq_dtd_resnet18",
+        "hosq_caltech101_resnet50", "hosq_dtd_resnet50",
+    }
+    for target in manifest["targets"].values():
+        assert len(target["variants"]) == 8
+        assert "hosq_r4_1_r8_2_final" in target["variants"]
+        assert "hosq_r4_1_r8_2_pointwise" in target["variants"]
 
 def test_strict_bitfit_does_not_collapse_to_linear_probe():
     model = resnet18(weights=None)
@@ -59,7 +77,7 @@ def test_run_from_config_dry_run_writes_metadata(tmp_path: Path):
         "target": "unit_test",
         "kind": "ablation",
         "method_preset": "dt1d",
-        "method_label": "SCDQ-DT1D-Adapter",
+        "method_label": "HOSQ-DT1D-Adapter",
         "variant": "final",
         "independent_seed": 0,
         "args": {

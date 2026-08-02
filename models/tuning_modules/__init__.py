@@ -69,6 +69,10 @@ def set_tuning_config(tuning_method, args):
             "padding_mode": getattr(args, "dt_padding", "reflect"),
             "minimal_quotient_realization": getattr(args, "dt_minimal_quotient_realization", False),
             "quotient_support_cap": getattr(args, "dt_quotient_support_cap", 8),
+            "hosq_realization": getattr(args, "dt_hosq_realization", False),
+            "hosq_subgroup_size": getattr(args, "dt_hosq_subgroup_size", 8),
+            "hosq_rank4": getattr(args, "dt_hosq_rank4", 1),
+            "hosq_rank8": getattr(args, "dt_hosq_rank8", 2),
         }
 
     if tm == "bam":

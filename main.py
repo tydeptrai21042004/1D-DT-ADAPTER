@@ -112,7 +112,11 @@ def get_args_parser():
     parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None)
     parser.add_argument("--dt_closed_form_dyadic_realization", type=str2bool, default=None)
     parser.add_argument("--dt_minimal_quotient_realization", type=str2bool, default=None, help="Use the Minimal Laurent Quotient dyadic DT1D parameterization.")
-    parser.add_argument("--dt_quotient_support_cap", type=int, default=None, choices=[4,8], help="Maximum MLQ dyadic offset; 4 removes the aliased outer d=4 second harmonic.")
+    parser.add_argument("--dt_quotient_support_cap", type=int, default=None, choices=[4,8], help="Maximum MLQ dyadic offset; HOSQ requires 8.")
+    parser.add_argument("--dt_hosq_realization", type=str2bool, default=None, help="Use Hierarchically Orthogonal Spectral Quotient DT1D.")
+    parser.add_argument("--dt_hosq_subgroup_size", type=int, default=None, help="Fine HOSQ subgroup size inside each coarse alpha group.")
+    parser.add_argument("--dt_hosq_rank4", type=int, default=None, help="Number of orthogonal channel contrasts at offset 4.")
+    parser.add_argument("--dt_hosq_rank8", type=int, default=None, help="Number of orthogonal channel contrasts at offset 8.")
     parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
@@ -321,6 +325,10 @@ def canonicalize_args(args):
         "dt_closed_form_dyadic_realization": True,
         "dt_minimal_quotient_realization": False,
         "dt_quotient_support_cap": 8,
+        "dt_hosq_realization": False,
+        "dt_hosq_subgroup_size": 8,
+        "dt_hosq_rank4": 1,
+        "dt_hosq_rank8": 2,
         "dt_input_adaptive_gate": False,
         "dt_gate_reduction": 4,
         "dt_axis": "hw",
@@ -703,6 +711,10 @@ def _add_adapters(model_backbone: nn.Module, args):
                 closed_form_dyadic_realization=args.dt_closed_form_dyadic_realization,
                 minimal_quotient_realization=args.dt_minimal_quotient_realization,
                 quotient_support_cap=args.dt_quotient_support_cap,
+                hosq_realization=args.dt_hosq_realization,
+                hosq_subgroup_size=args.dt_hosq_subgroup_size,
+                hosq_rank4=args.dt_hosq_rank4,
+                hosq_rank8=args.dt_hosq_rank8,
                 input_adaptive_gate=args.dt_input_adaptive_gate,
                 gate_reduction=args.dt_gate_reduction,
                 axis=args.dt_axis,

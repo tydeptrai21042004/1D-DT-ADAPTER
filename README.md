@@ -1,13 +1,28 @@
-# SCDQ-DT1D v0.9.1
+# HOSQ-DT1D v0.10.0
 
-The final comparison preset now uses the **Spectrally Closed Dyadic Quotient**
-parameterization with support cap 4, reflect padding, group size 16, and no
-optional pointwise mixer. The original shifted-symmetric group-shared axial
-convolution remains the trainable spatial operator.
+This release adds **Hierarchically Orthogonal Spectral Quotient DT1D-Adapter
+(HOSQ-DT1D)** while retaining the original reduced axial filtering and shifted
+symmetric group-shared kernel principle.
 
-For Kaggle, upload `DT1D_V9_SCDQ_KAGGLE_FINAL.zip` as a Dataset and paste
-`KAGGLE_SCDQ_FULL_CELL.txt` into one notebook cell, or push branch
-`dt1d-v9-scdq-math-latency` and let the same cell clone it.
+The final preset uses an MLQ8 Group-32 coarse quotient, Group-8 orthogonal
+channel-detail subgroups, one zero-DC contrast at offset 4, two contrasts at
+offset 8, height/width filtering, a residual scalar gate, and no optional
+pointwise block. It uses ordinary PyTorch depthwise axial convolution—no custom
+CUDA, compilation, quantization, pruning, caching, or TensorRT.
+
+The existing Git branch name is intentionally unchanged:
+`dt1d-v8-cnn-three-seed`.
+
+Quick validation:
+
+```bash
+pytest -q
+python tools/validate_hosq_theory.py
+python tools/benchmark_hosq_latency.py --batch-size 4 --warmup 3 --iters 8
+```
+
+Use `KAGGLE_HOSQ_FULL_CELL.txt` after pushing this release to the unchanged
+GitHub branch.
 
 
 This repository is the **CNN-only** experimental package for DT1D-Adapter. New paper runs use the canonical implementation `models/dt1d_adapter.py`, class `DT1DAdapter`, CLI method `--tuning_method dt`, and `--dt_*` arguments. `models/hcc_adapter.py` is retained only as a compatibility shim for older checkpoints.
@@ -157,10 +172,10 @@ Each run directory contains `args.json`, `resolved_config.json`, `command.sh`, `
 
 ## Kaggle
 
-Push branch `dt1d-v9-scdq-math-latency`, enable Internet and a GPU, then use [`KAGGLE_SCDQ_FULL_CELL.txt`](KAGGLE_SCDQ_FULL_CELL.txt). Select a target at the top of the cell:
+Push branch `dt1d-v8-cnn-three-seed`, enable Internet and a GPU, then use [`KAGGLE_SCDQ_FULL_CELL.txt`](KAGGLE_SCDQ_FULL_CELL.txt). Select a target at the top of the cell:
 
 ```bash
-BRANCH="dt1d-v9-scdq-math-latency"
+BRANCH="dt1d-v8-cnn-three-seed"
 TARGET="table_14_15"
 SEEDS="0,1,2"
 ```
@@ -187,7 +202,7 @@ python tools/run_cnn_paper.py \
 
 ## Release
 
-Prepared branch: `dt1d-v9-scdq-math-latency`  
+Prepared branch: `dt1d-v8-cnn-three-seed`  
 Prepared tag: `v0.8.0`
 
 See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`MANUSCRIPT_TO_CODE.md`](MANUSCRIPT_TO_CODE.md), [`MANUSCRIPT_ALIGNMENT_NOTES.md`](MANUSCRIPT_ALIGNMENT_NOTES.md), and [`PRETRAINED_WEIGHTS.md`](PRETRAINED_WEIGHTS.md).

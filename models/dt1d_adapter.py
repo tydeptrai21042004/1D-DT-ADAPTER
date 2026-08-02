@@ -76,6 +76,13 @@ class DT1DAdapter(nn.Module):
         closed_form_dyadic_realization: bool = True,
         minimal_quotient_realization: bool = False,
         quotient_support_cap: int = 8,
+        # Hierarchically Orthogonal Spectral Quotient (HOSQ). This retains
+        # the MLQ8 coarse quotient while adding a very small orthogonal
+        # channel-detail space at offsets 4 and 8.
+        hosq_realization: bool = False,
+        hosq_subgroup_size: int = 8,
+        hosq_rank4: int = 1,
+        hosq_rank8: int = 2,
         input_adaptive_gate: bool = False,  # deprecated/ignored; kept for CLI compatibility
         gate_reduction: int = 4,            # deprecated/ignored; kept for CLI compatibility
         **legacy,
@@ -137,6 +144,10 @@ class DT1DAdapter(nn.Module):
         # while preserving axial convolution and group-shared shifted symmetry.
         self.minimal_quotient_realization = bool(minimal_quotient_realization)
         self.quotient_support_cap = int(quotient_support_cap)
+        self.hosq_realization = bool(hosq_realization)
+        self.hosq_subgroup_size = max(1, int(hosq_subgroup_size))
+        self.hosq_rank4_requested = max(0, int(hosq_rank4))
+        self.hosq_rank8_requested = max(0, int(hosq_rank8))
         # The GAP-MLP input-adaptive router has been removed. Keep these attributes
         # only so older scripts/checkpoints that inspect them do not fail.
         self.input_adaptive_gate = False
@@ -163,7 +174,65 @@ class DT1DAdapter(nn.Module):
         self.num_scales = len(self.dilations)
         self.num_alpha_axes = self.num_axes if self.separate_axis_kernels else 1
 
-        if self.minimal_quotient_realization:
+        if self.hosq_realization and self.minimal_quotient_realization:
+            raise ValueError(
+                "hosq_realization and minimal_quotient_realization are separate modes; "
+                "enable only hosq_realization for HOSQ."
+            )
+
+        if self.hosq_realization:
+            if self.M != 1 or tuple(self.dilations) != (1, 2, 4):
+                raise ValueError("hosq_realization requires M=1 and dilations=(1,2,4)")
+            if not self.scale_adaptive:
+                raise ValueError("hosq_realization requires scale_adaptive=True")
+            if self.quotient_support_cap != 8:
+                raise ValueError("HOSQ uses the full coarse MLQ8 support; set quotient_support_cap=8")
+            if self.hosq_subgroup_size > self.alpha_group:
+                raise ValueError("hosq_subgroup_size cannot exceed alpha_group")
+            if self.alpha_group % self.hosq_subgroup_size != 0:
+                raise ValueError("alpha_group must be divisible by hosq_subgroup_size")
+
+            self.quotient_offsets = (0, 1, 2, 4, 8)
+            max_subgroups = max(1, math.ceil(min(self.C, self.alpha_group) / self.hosq_subgroup_size))
+            max_contrasts = max(0, max_subgroups - 1)
+            self.hosq_rank4 = min(self.hosq_rank4_requested, max_contrasts)
+            self.hosq_rank8 = min(self.hosq_rank8_requested, max_contrasts)
+
+            self.register_parameter("alpha", None)
+            self.quotient_beta = nn.Parameter(
+                torch.zeros(self.num_axes, self.num_alpha_groups, len(self.quotient_offsets))
+            )
+
+            basis, channel_groups, channel_subgroups, subgroup_counts = self._make_hosq_index_buffers()
+            detail4_groups, detail4_modes = self._make_hosq_detail_coordinate_map(
+                subgroup_counts, self.hosq_rank4
+            )
+            detail8_groups, detail8_modes = self._make_hosq_detail_coordinate_map(
+                subgroup_counts, self.hosq_rank8
+            )
+            # Flat coordinates allocate only mathematically valid contrasts. This
+            # avoids unused parameters in remainder channel groups.
+            self.hosq_detail4 = nn.Parameter(
+                torch.zeros(self.num_axes, int(detail4_groups.numel()))
+            )
+            self.hosq_detail8 = nn.Parameter(
+                torch.zeros(self.num_axes, int(detail8_groups.numel()))
+            )
+            with torch.no_grad():
+                init_side = 1.0 / float(2 * self.num_axes * self.num_scales)
+                self.quotient_beta[..., 1:4].fill_(init_side)
+
+            self.register_buffer("hosq_basis", basis, persistent=True)
+            self.register_buffer("hosq_channel_group", channel_groups, persistent=True)
+            self.register_buffer("hosq_channel_subgroup", channel_subgroups, persistent=True)
+            self.register_buffer("hosq_subgroup_counts", subgroup_counts, persistent=True)
+            self.register_buffer("hosq_detail4_group", detail4_groups, persistent=True)
+            self.register_buffer("hosq_detail4_mode", detail4_modes, persistent=True)
+            self.register_buffer("hosq_detail8_group", detail8_groups, persistent=True)
+            self.register_buffer("hosq_detail8_mode", detail8_modes, persistent=True)
+            self.register_parameter("quotient_axis_logits", None)
+            self.register_parameter("axis_scale_logits", None)
+        elif self.minimal_quotient_realization:
             if self.M != 1 or tuple(self.dilations) != (1, 2, 4):
                 raise ValueError(
                     "minimal_quotient_realization currently requires M=1 and dilations=(1,2,4)"
@@ -185,10 +254,14 @@ class DT1DAdapter(nn.Module):
                 # has weight 1/(A*S).
                 init_side = 1.0 / float(2 * self.num_axes * self.num_scales)
                 self.quotient_beta[..., 1:4].fill_(init_side)
+            self.register_parameter("hosq_detail4", None)
+            self.register_parameter("hosq_detail8", None)
             self.register_parameter("quotient_axis_logits", None)
             self.register_parameter("axis_scale_logits", None)
         else:
             self.alpha = nn.Parameter(torch.zeros(self.num_alpha_axes, self.num_scales, self.num_alpha_groups, ncoef))
+            self.register_parameter("hosq_detail4", None)
+            self.register_parameter("hosq_detail8", None)
             with torch.no_grad():
                 self.alpha[..., 0].fill_(1.0)  # identity-like axial filter before residual gate
             self.register_parameter("quotient_beta", None)
@@ -231,14 +304,25 @@ class DT1DAdapter(nn.Module):
             f"exact_cost_realization={self.exact_cost_realization}, "
             f"closed_form_dyadic_realization={self.closed_form_dyadic_realization}, "
             f"minimal_quotient_realization={self.minimal_quotient_realization}, "
+            f"hosq_realization={self.hosq_realization}, "
             f"quotient_support_cap={self.quotient_support_cap}, "
+            f"hosq_subgroup_size={self.hosq_subgroup_size}, "
+            f"hosq_ranks=({getattr(self, 'hosq_rank4', 0)},{getattr(self, 'hosq_rank8', 0)}), "
             f"separate_axis_kernels={self.separate_axis_kernels}, "
             f"alpha_group={self.alpha_group}, G={self.num_alpha_groups}, "
             f"no_pw={self.no_pw}, gate={float(self.gate.detach().cpu()):.4g}"
         )
 
     def parameter_count_breakdown(self) -> Dict[str, int]:
-        if self.minimal_quotient_realization:
+        if self.hosq_realization:
+            axial = (
+                self.quotient_beta.numel()
+                + self.hosq_detail4.numel()
+                + self.hosq_detail8.numel()
+                + self.gate.numel()
+            )
+            axis_scale = 0
+        elif self.minimal_quotient_realization:
             axial = self.quotient_beta.numel() + self.gate.numel()
             axis_scale = 0
         else:
@@ -275,6 +359,169 @@ class DT1DAdapter(nn.Module):
         weights = torch.softmax(logits.reshape(-1), dim=0)
         return weights.reshape(self.num_axes, self.num_scales)
 
+
+    @staticmethod
+    def _orthogonal_subgroup_basis(n: int, device=None, dtype=None) -> torch.Tensor:
+        """Return a zero-mean orthonormal contrast basis on ``n`` subgroups.
+
+        For four subgroups this is the fixed hierarchical Haar basis used in
+        HOSQ. For a remainder group with two or three subgroups, a canonical
+        Helmert basis is used so the zero-mean/orthogonality theorem remains
+        valid instead of silently introducing unused coordinates.
+        """
+        dtype = dtype or torch.float32
+        if n <= 1:
+            return torch.zeros(n, 0, device=device, dtype=dtype)
+        if n == 4:
+            return torch.tensor(
+                [
+                    [0.5, 1.0 / math.sqrt(2.0), 0.0],
+                    [0.5, -1.0 / math.sqrt(2.0), 0.0],
+                    [-0.5, 0.0, 1.0 / math.sqrt(2.0)],
+                    [-0.5, 0.0, -1.0 / math.sqrt(2.0)],
+                ],
+                device=device,
+                dtype=dtype,
+            )
+        # Helmert contrasts: column k contrasts the first k entries with k+1.
+        basis = torch.zeros(n, n - 1, device=device, dtype=dtype)
+        for k in range(1, n):
+            denom = math.sqrt(float(k * (k + 1)))
+            basis[:k, k - 1] = 1.0 / denom
+            basis[k, k - 1] = -float(k) / denom
+        return basis
+
+    def _make_hosq_index_buffers(
+        self,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Create padded group bases and channel-to-subgroup index maps."""
+        max_subgroups = max(1, math.ceil(self.alpha_group / self.hosq_subgroup_size))
+        # Store the complete orthogonal basis as a non-trainable buffer even when
+        # the final model activates only a low-rank prefix of it.
+        max_rank = max(0, max_subgroups - 1)
+        basis = torch.zeros(self.num_alpha_groups, max_subgroups, max_rank)
+        channel_group = torch.empty(self.C, dtype=torch.long)
+        channel_subgroup = torch.empty(self.C, dtype=torch.long)
+        subgroup_counts = torch.empty(self.num_alpha_groups, dtype=torch.long)
+
+        start = 0
+        for g in range(self.num_alpha_groups):
+            group_channels = min(self.alpha_group, self.C - start)
+            n_subgroups = max(1, math.ceil(group_channels / self.hosq_subgroup_size))
+            subgroup_counts[g] = n_subgroups
+            local_basis = self._orthogonal_subgroup_basis(n_subgroups)
+            active_rank = min(max_rank, local_basis.shape[1])
+            if active_rank:
+                basis[g, :n_subgroups, :active_rank] = local_basis[:, :active_rank]
+            for local_c in range(group_channels):
+                channel_group[start + local_c] = g
+                channel_subgroup[start + local_c] = min(
+                    local_c // self.hosq_subgroup_size, n_subgroups - 1
+                )
+            start += group_channels
+        return basis, channel_group, channel_subgroup, subgroup_counts
+
+    @staticmethod
+    def _make_hosq_detail_coordinate_map(
+        subgroup_counts: torch.Tensor, requested_rank: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return flat valid ``(group, contrast-mode)`` coordinates."""
+        groups = []
+        modes = []
+        for g, count in enumerate(subgroup_counts.tolist()):
+            active = min(int(requested_rank), max(0, int(count) - 1))
+            for mode in range(active):
+                groups.append(g)
+                modes.append(mode)
+        return torch.tensor(groups, dtype=torch.long), torch.tensor(modes, dtype=torch.long)
+
+    def _hosq_channel_detail(
+        self,
+        theta: torch.Tensor,
+        coordinate_groups: torch.Tensor,
+        coordinate_modes: torch.Tensor,
+        group_idx: torch.Tensor,
+        subgroup_idx: torch.Tensor,
+        basis: torch.Tensor,
+    ) -> torch.Tensor:
+        """Expand flat valid detail coordinates to per-channel coefficients."""
+        if theta.shape[1] == 0:
+            return torch.zeros(self.num_axes, self.C, device=theta.device, dtype=theta.dtype)
+        coord_groups = coordinate_groups.to(device=theta.device)
+        coord_modes = coordinate_modes.to(device=theta.device)
+        selected_groups = basis[coord_groups]  # T,S,R
+        gather_index = coord_modes.view(-1, 1, 1).expand(-1, selected_groups.shape[1], 1)
+        selected_basis = selected_groups.gather(2, gather_index).squeeze(2)  # T,S
+        contributions = theta.unsqueeze(-1) * selected_basis.unsqueeze(0)  # A,T,S
+        per_group = torch.zeros(
+            self.num_axes, self.num_alpha_groups, basis.shape[1],
+            device=theta.device, dtype=theta.dtype,
+        )
+        per_group.index_add_(1, coord_groups, contributions)
+        return per_group[:, group_idx, subgroup_idx]
+
+    def _build_normalized_hosq_kernels(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Build jointly normalized HOSQ kernels with shape ``(A,C,1,17)``.
+
+        The coarse term is MLQ8 at Group-32 resolution. Fine terms use
+        orthogonal channel contrasts and the zero-DC atoms
+
+            psi_r = delta_-r + delta_r - 2 delta_0, r in {4,8}.
+
+        Joint per-channel normalization across axes preserves the non-expansive
+        operator bound without changing the convolution implementation.
+        """
+        group_idx = self.hosq_channel_group.to(device=device)
+        subgroup_idx = self.hosq_channel_subgroup.to(device=device)
+        beta = self.quotient_beta.to(device=device, dtype=dtype)[:, group_idx, :]  # A,C,5
+        kernel = torch.zeros(self.num_axes, self.C, 17, device=device, dtype=dtype)
+        center = 8
+        kernel[..., center] = beta[..., 0]
+        for j, offset in enumerate((1, 2, 4, 8), start=1):
+            kernel[..., center - offset] = beta[..., j]
+            kernel[..., center + offset] = beta[..., j]
+
+        basis = self.hosq_basis.to(device=device, dtype=dtype)
+        if self.hosq_detail4.shape[1]:
+            d4 = self._hosq_channel_detail(
+                self.hosq_detail4.to(device=device, dtype=dtype),
+                self.hosq_detail4_group, self.hosq_detail4_mode,
+                group_idx, subgroup_idx, basis,
+            )
+            kernel[..., center - 4] += d4
+            kernel[..., center + 4] += d4
+            kernel[..., center] -= 2.0 * d4
+        if self.hosq_detail8.shape[1]:
+            d8 = self._hosq_channel_detail(
+                self.hosq_detail8.to(device=device, dtype=dtype),
+                self.hosq_detail8_group, self.hosq_detail8_mode,
+                group_idx, subgroup_idx, basis,
+            )
+            kernel[..., center - 8] += d8
+            kernel[..., center + 8] += d8
+            kernel[..., center] -= 2.0 * d8
+
+        joint_l1 = kernel.abs().sum(dim=-1).sum(dim=0)  # C
+        scale = torch.maximum(joint_l1, torch.ones_like(joint_l1)).view(1, self.C, 1)
+        return (kernel / scale).unsqueeze(2)
+
+    @torch.no_grad()
+    def initialize_hosq_from_mlq(self, mlq: "DT1DAdapter") -> None:
+        """Initialize HOSQ from a compatible MLQ8 model with zero fine details."""
+        if not self.hosq_realization:
+            raise RuntimeError("target module is not in HOSQ mode")
+        if not mlq.minimal_quotient_realization or mlq.quotient_support_cap != 8:
+            raise ValueError("source module must be MLQ8")
+        if mlq.num_axes != self.num_axes or mlq.num_alpha_groups != self.num_alpha_groups:
+            raise ValueError("source and target must use matching axes and coarse groups")
+        self.quotient_beta.copy_(mlq.quotient_beta.to(self.quotient_beta))
+        self.hosq_detail4.zero_()
+        self.hosq_detail8.zero_()
+        self.gate.copy_(mlq.gate.to(self.gate))
+        if not self.no_pw and not mlq.no_pw:
+            self.pw.load_state_dict(mlq.pw.state_dict())
 
     @staticmethod
     def dyadic_quotient_matrix(device=None, dtype=None) -> torch.Tensor:
@@ -693,9 +940,16 @@ class DT1DAdapter(nn.Module):
         if x.shape[1] != self.C:
             raise ValueError(f"Channel mismatch: adapter C={self.C}, input C={x.shape[1]}")
 
+        # HOSQ path: MLQ8 coarse quotient plus orthogonal zero-DC
+        # channel-spectral detail, still using one convolution per enabled axis.
+        if self.hosq_realization:
+            kernels = self._build_normalized_hosq_kernels(x.device, x.dtype)
+            y = torch.zeros_like(x)
+            for ai, axis_name in enumerate(self.axis_names):
+                y = y + self._conv_axis(x, axis_name, kernels[ai], dilation=1)
         # Minimal Laurent quotient path: one exact symmetric axial convolution
         # per enabled axis, with no scale-branch redundancy.
-        if self.minimal_quotient_realization:
+        elif self.minimal_quotient_realization:
             beta = self._normalized_quotient_beta(x.device, x.dtype)
             y = torch.zeros_like(x)
             for ai, axis_name in enumerate(self.axis_names):

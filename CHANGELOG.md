@@ -1,3 +1,22 @@
+# v0.10.0 — HOSQ-DT1D hierarchical quotient release
+
+- Added HOSQ-DT1D: an MLQ8 Group-32 coarse quotient plus low-rank orthogonal
+  Group-8 channel details at offsets 4 and 8.
+- Added fixed hierarchical Haar contrasts for four subgroups and canonical
+  zero-mean orthogonal remainder-group contrasts.
+- Added zero-DC spatial detail atoms and joint height/width L1 projection.
+- Added CLI flags `dt_hosq_realization`, `dt_hosq_subgroup_size`,
+  `dt_hosq_rank4`, and `dt_hosq_rank8`.
+- Updated the main Table 14–15 proposal preset to HOSQ-DT1D without changing
+  the Git branch name.
+- Added an eight-variant HOSQ ablation matrix over four dataset/backbone
+  settings, each with seeds 0, 1, and 2.
+- Added deterministic theory validation, CPU structural benchmarking, and
+  end-to-end FakeData training smoke validation.
+- Verified the ResNet-18 HOSQ adapter budget: 968 adapter parameters and 52,781
+  total trainable parameters on Caltech101.
+- Validation: 316 passed, 1 skipped, 10 subtests passed.
+
 # v0.9.1 — corrected SCDQ/Kaggle release
 
 - Makes SCDQ4 with reflect padding and no pointwise mixer the Table 14–15 proposal preset.

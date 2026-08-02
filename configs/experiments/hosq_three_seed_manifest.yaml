@@ -1,0 +1,177 @@
+schema_version: 2
+scope: cnn_classification_hosq_ablation
+default_seeds:
+- 0
+- 1
+- 2
+description: HOSQ-DT1D three-seed screening and cross-setting ablations. The final variant uses an MLQ8 Group-32 coarse quotient plus zero-DC orthogonal channel details at offsets 4 and 8.
+common_args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.1
+method_presets:
+  dt1d:
+    label: HOSQ-DT1D ablation
+    args:
+      tuning_method: dt
+      freeze_backbone: true
+      dt_M: 1
+      dt_h: 1
+      dt_dilations: 1,2,4
+      dt_scale_adaptive: true
+      dt_separate_axis_kernels: true
+      dt_gate_temperature: 1.0
+      dt_exact_cost_realization: false
+      dt_closed_form_dyadic_realization: false
+      dt_input_adaptive_gate: false
+      dt_axis: hw
+      dt_alpha_group: 32
+      dt_no_pw: true
+      dt_pw_ratio: 32
+      dt_pw_groups: 4
+      dt_gate_init: 0.01
+      dt_padding: reflect
+      adapt_scale: 1.0
+all_cnn_methods:
+- dt1d
+targets:
+  hosq_caltech101_resnet18:
+    kind: ablation
+    manuscript_tables:
+    - 14
+    - 15
+    dataset: caltech101
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    args:
+      val_ratio: 0.1
+      test_ratio: 0.1
+    methods:
+    - dt1d
+    variants: &id001
+      scdq4_group32_core:
+        dt_minimal_quotient_realization: true
+        dt_quotient_support_cap: 4
+        dt_hosq_realization: false
+        dt_alpha_group: 32
+        dt_no_pw: true
+      mlq8_group32_core:
+        dt_minimal_quotient_realization: true
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: false
+        dt_alpha_group: 32
+        dt_no_pw: true
+      mlq8_group8_core:
+        dt_minimal_quotient_realization: true
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: false
+        dt_alpha_group: 8
+        dt_no_pw: true
+      hosq_r4_0_r8_0:
+        dt_minimal_quotient_realization: false
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: true
+        dt_hosq_subgroup_size: 8
+        dt_hosq_rank4: 0
+        dt_hosq_rank8: 0
+        dt_alpha_group: 32
+        dt_no_pw: true
+      hosq_r4_0_r8_1:
+        dt_minimal_quotient_realization: false
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: true
+        dt_hosq_subgroup_size: 8
+        dt_hosq_rank4: 0
+        dt_hosq_rank8: 1
+        dt_alpha_group: 32
+        dt_no_pw: true
+      hosq_r4_1_r8_1:
+        dt_minimal_quotient_realization: false
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: true
+        dt_hosq_subgroup_size: 8
+        dt_hosq_rank4: 1
+        dt_hosq_rank8: 1
+        dt_alpha_group: 32
+        dt_no_pw: true
+      hosq_r4_1_r8_2_final:
+        dt_minimal_quotient_realization: false
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: true
+        dt_hosq_subgroup_size: 8
+        dt_hosq_rank4: 1
+        dt_hosq_rank8: 2
+        dt_alpha_group: 32
+        dt_no_pw: true
+      hosq_r4_1_r8_2_pointwise:
+        dt_minimal_quotient_realization: false
+        dt_quotient_support_cap: 8
+        dt_hosq_realization: true
+        dt_hosq_subgroup_size: 8
+        dt_hosq_rank4: 1
+        dt_hosq_rank8: 2
+        dt_alpha_group: 32
+        dt_no_pw: false
+  hosq_dtd_resnet18:
+    kind: ablation
+    manuscript_tables:
+    - 14
+    - 15
+    dataset: dtd
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    args:
+      val_ratio: 0.1
+      test_ratio: 0.1
+    methods:
+    - dt1d
+    variants: *id001
+  hosq_caltech101_resnet50:
+    kind: ablation
+    manuscript_tables:
+    - 14
+    - 15
+    dataset: caltech101
+    backbone: resnet50
+    epochs: 10
+    batch_size: 64
+    args:
+      val_ratio: 0.1
+      test_ratio: 0.1
+    methods:
+    - dt1d
+    variants: *id001
+  hosq_dtd_resnet50:
+    kind: ablation
+    manuscript_tables:
+    - 14
+    - 15
+    dataset: dtd
+    backbone: resnet50
+    epochs: 10
+    batch_size: 64
+    args:
+      val_ratio: 0.1
+      test_ratio: 0.1
+    methods:
+    - dt1d
+    variants: *id001

@@ -30,7 +30,7 @@ common_args:
 
 method_presets:
   dt1d:
-    label: DT1D-Adapter
+    label: HOSQ-DT1D-Adapter
     args:
       tuning_method: dt
       freeze_backbone: true
@@ -40,12 +40,18 @@ method_presets:
       dt_scale_adaptive: true
       dt_separate_axis_kernels: true
       dt_gate_temperature: 1.0
-      dt_exact_cost_realization: true
-      dt_closed_form_dyadic_realization: true
+      dt_exact_cost_realization: false
+      dt_closed_form_dyadic_realization: false
+      dt_minimal_quotient_realization: false
+      dt_quotient_support_cap: 8
+      dt_hosq_realization: true
+      dt_hosq_subgroup_size: 8
+      dt_hosq_rank4: 1
+      dt_hosq_rank8: 2
       dt_input_adaptive_gate: false
       dt_axis: hw
-      dt_alpha_group: 16
-      dt_no_pw: false
+      dt_alpha_group: 32
+      dt_no_pw: true
       dt_pw_ratio: 32
       dt_pw_groups: 4
       dt_gate_init: 0.01
