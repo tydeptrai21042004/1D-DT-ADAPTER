@@ -67,12 +67,10 @@ def set_tuning_config(tuning_method, args):
             "residual_scale": getattr(args, "adapt_scale", 1.0),
             "gate_init": getattr(args, "dt_gate_init", 0.01),
             "padding_mode": getattr(args, "dt_padding", "reflect"),
-            "minimal_quotient_realization": getattr(args, "dt_minimal_quotient_realization", False),
-            "quotient_support_cap": getattr(args, "dt_quotient_support_cap", 8),
-            "hosq_realization": getattr(args, "dt_hosq_realization", False),
-            "hosq_subgroup_size": getattr(args, "dt_hosq_subgroup_size", 8),
-            "hosq_rank4": getattr(args, "dt_hosq_rank4", 1),
-            "hosq_rank8": getattr(args, "dt_hosq_rank8", 2),
+            "variant": getattr(args, "dt_variant", "hosq_lite_c1"),
+            "detail_basis": getattr(args, "dt_detail_basis", "orth"),
+            "detail_components": getattr(args, "dt_detail_components", "both"),
+            "contrast_split": getattr(args, "dt_contrast_split", 8),
         }
 
     if tm == "bam":

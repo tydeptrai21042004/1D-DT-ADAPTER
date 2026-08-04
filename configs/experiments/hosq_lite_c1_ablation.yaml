@@ -1,0 +1,218 @@
+schema_version: 2
+default_seeds:
+- 0
+- 1
+- 2
+common_args:
+  data_path: data
+  device: cuda
+  weights: DEFAULT
+  input_size: 224
+  imagenet_norm: true
+  imagenet_default_mean_and_std: true
+  update_freq: 1
+  deterministic: true
+  num_workers: 2
+  use_amp: true
+  pin_mem: true
+  dist_eval: false
+  final_test: true
+  save_history: true
+  save_ckpt: true
+  profile_efficiency: true
+  profile_batch_size: 16
+  measure_eval_latency: true
+  enable_wandb: false
+  val_ratio: 0.2
+method_presets:
+  dt1d:
+    label: HOSQ-Lite-C1-Orth DT1D-Adapter
+    args:
+      tuning_method: dt
+      freeze_backbone: true
+      dt_variant: hosq_lite_c1
+      dt_M: 1
+      dt_h: 1
+      dt_dilations: 1,2,4
+      dt_scale_adaptive: true
+      dt_separate_axis_kernels: true
+      dt_gate_temperature: 1.0
+      dt_detail_basis: orth
+      dt_detail_components: both
+      dt_contrast_split: 8
+      dt_input_adaptive_gate: false
+      dt_axis: hw
+      dt_alpha_group: 16
+      dt_no_pw: true
+      dt_pw_ratio: 32
+      dt_pw_groups: 4
+      dt_gate_init: 0.01
+      dt_padding: replicate
+      adapt_scale: 1.0
+  full:
+    label: Full fine-tuning
+    args:
+      tuning_method: full
+      freeze_backbone: false
+  linear:
+    label: Linear probing
+    args:
+      tuning_method: linear
+      freeze_backbone: true
+  conv_r2:
+    label: Conv-Adapter (r=2)
+    args:
+      tuning_method: conv
+      freeze_backbone: true
+      adapt_size: 2
+      kernel_size: 3
+      adapt_scale: 1.0
+  conv_r4:
+    label: Conv-Adapter (r=4)
+    args:
+      tuning_method: conv
+      freeze_backbone: true
+      adapt_size: 4
+      kernel_size: 3
+      adapt_scale: 1.0
+  conv_r6:
+    label: Conv-Adapter (r=6)
+    args:
+      tuning_method: conv
+      freeze_backbone: true
+      adapt_size: 6
+      kernel_size: 3
+      adapt_scale: 1.0
+  conv_r8:
+    label: Conv-Adapter (r=8)
+    args:
+      tuning_method: conv
+      freeze_backbone: true
+      adapt_size: 8
+      kernel_size: 3
+      adapt_scale: 1.0
+  residual:
+    label: Residual Adapters
+    args:
+      tuning_method: residual
+      freeze_backbone: true
+      ra_mode: parallel
+      ra_reduction: 16
+      ra_norm: bn
+      ra_act: relu
+      ra_gate_init: 0.0
+      ra_stages: 1,2,3,4
+  ssf:
+    label: SSF
+    args:
+      tuning_method: ssf
+      freeze_backbone: true
+      ssf_init_scale: 1.0
+      ssf_init_shift: 0.0
+  bitfit:
+    label: BitFit
+    args:
+      tuning_method: bitfit
+      freeze_backbone: true
+      bitfit_train_head: true
+  bam:
+    label: BAM-Tuning
+    args:
+      tuning_method: bam
+      freeze_backbone: true
+      bam_reduction: 16
+      bam_dilation: 4
+      bam_gate_init: 0.0
+      bam_use_bn: true
+      bam_insert: stage
+      bam_stages: 1,2,3,4
+  lora_conv:
+    label: LoRA-Conv
+    args:
+      tuning_method: lora_conv
+      freeze_backbone: true
+      lora_r: 8
+      lora_alpha: 16.0
+      lora_target: all
+  sidetune:
+    label: Side-Tuning
+    args:
+      tuning_method: sidetune
+      freeze_backbone: true
+      sidetune_alpha: 0.5
+      sidetune_learn_alpha: true
+      sidetune_width: 64
+      sidetune_depth: 3
+scope: hosq_lite_c1_ablation
+description: Focused ablation of the single HOSQ-Lite-C1-Orth proposal against original
+  DT1D.
+all_cnn_methods:
+- dt1d
+targets:
+  hosq_lite_c1_ablation:
+    kind: ablation
+    manuscript_tables:
+    - 2
+    dataset: dtd
+    backbone: resnet18
+    epochs: 10
+    batch_size: 64
+    methods:
+    - dt1d
+    variants:
+      final_hosq_lite_c1_orth:
+        dt_variant: hosq_lite_c1
+        dt_detail_basis: orth
+        dt_detail_components: both
+        dt_alpha_group: 16
+        dt_axis: hw
+        dt_padding: replicate
+      original_dt1d_pointwise:
+        dt_variant: legacy
+        dt_M: 1
+        dt_dilations: 1,2,4
+        dt_scale_adaptive: true
+        dt_alpha_group: 16
+        dt_axis: hw
+        dt_no_pw: false
+        dt_padding: replicate
+      original_dt1d_core:
+        dt_variant: legacy
+        dt_M: 1
+        dt_dilations: 1,2,4
+        dt_scale_adaptive: true
+        dt_alpha_group: 16
+        dt_axis: hw
+        dt_no_pw: true
+        dt_padding: replicate
+      without_orthogonal_detail:
+        dt_variant: hosq_lite_c1
+        dt_detail_basis: orth
+        dt_detail_components: none
+      offset4_detail_only:
+        dt_variant: hosq_lite_c1
+        dt_detail_basis: orth
+        dt_detail_components: offset4
+      offset8_detail_only:
+        dt_variant: hosq_lite_c1
+        dt_detail_basis: orth
+        dt_detail_components: offset8
+      raw_zero_dc_atoms:
+        dt_variant: hosq_lite_c1
+        dt_detail_basis: raw
+        dt_detail_components: both
+      height_only:
+        dt_variant: hosq_lite_c1
+        dt_axis: h
+      width_only:
+        dt_variant: hosq_lite_c1
+        dt_axis: w
+      group8:
+        dt_variant: hosq_lite_c1
+        dt_alpha_group: 8
+        dt_contrast_split: 4
+      group32:
+        dt_variant: hosq_lite_c1
+        dt_alpha_group: 32
+        dt_contrast_split: 16
+    description: Focused HOSQ-Lite-C1-Orth ablation; no alternative proposal methods.

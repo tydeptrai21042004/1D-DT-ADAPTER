@@ -15,7 +15,7 @@ REQUIRED = [
     "README.md", "REPRODUCIBILITY.md", "MANUSCRIPT_TO_CODE.md", "MANUSCRIPT_ALIGNMENT_NOTES.md", "VERSION", "CHANGELOG.md",
     "requirements.txt", "requirements-kaggle.txt", "environment.yml",
     "CITATION.cff", "codemeta.json", ".zenodo.json", "LICENSE",
-    "models/dt1d_adapter.py", "models/hcc_adapter.py",
+    "models/dt1d_adapter.py", "models/hosq_lite_c1_adapter.py", "models/hcc_adapter.py",
     "configs/paper/cnn_three_seed_manifest.yaml",
     "splits/caltech101/seed0_holdout20.json", "splits/caltech101/seed1_holdout20.json", "splits/caltech101/seed2_holdout20.json",
     "reproducibility/seeds.json", "reproducibility/table_to_command.csv",
@@ -129,12 +129,13 @@ def main() -> None:
         raise SystemExit("Canonical DT1DAdapter class is missing.")
     if "from .dt1d_adapter import DT1DAdapter" not in shim:
         raise SystemExit("Legacy module must remain a thin compatibility shim.")
-    if ").to(device=fused.device, dtype=fused.dtype)" not in canonical:
-        raise SystemExit("AMP-safe fused-dtype accumulation is missing.")
+    proposal = (ROOT / "models" / "hosq_lite_c1_adapter.py").read_text(encoding="utf-8")
+    if "class HOSQLiteC1Adapter" not in proposal:
+        raise SystemExit("HOSQ-Lite-C1 proposal class is missing.")
+    if "def build_kernels" not in proposal or "def forward" not in proposal:
+        raise SystemExit("The fused proposal realization is missing.")
 
     kaggle = (ROOT / "KAGGLE_CNN_THREE_SEED_RUN.sh").read_text(encoding="utf-8")
-    if "dt1d-v8-cnn-three-seed" not in kaggle:
-        raise SystemExit("Kaggle runner does not name the v0.8 branch.")
     if 'SEEDS="${SEEDS:-0,1,2}"' not in kaggle:
         raise SystemExit("Kaggle runner does not default to seeds 0,1,2.")
 

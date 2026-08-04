@@ -207,7 +207,7 @@ def main() -> int:
         "records": records,
         "note": (
             "Historical count mismatches are diagnostic unless --strict-historical-counts is used. "
-            "Historical counts describe the prior manuscript; the v0.9.1 SCDQ source is authoritative for new reruns."
+            "Historical counts describe the prior manuscript; the current HOSQ-Lite-C1 manifest is authoritative for new reruns."
         ),
     }
     text = json.dumps(report, indent=2)

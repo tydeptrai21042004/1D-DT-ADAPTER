@@ -1,0 +1,2 @@
+# Run this from a Kaggle notebook after changing into the repository directory.
+!bash KAGGLE_CNN_THREE_SEED_RUN.sh

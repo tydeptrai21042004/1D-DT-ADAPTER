@@ -109,14 +109,20 @@ def get_args_parser():
     parser.add_argument("--dt_scale_adaptive", type=str2bool, default=None, help="Enable learnable static axis-scale gates.")
     parser.add_argument("--dt_separate_axis_kernels", type=str2bool, default=None)
     parser.add_argument("--dt_gate_temperature", type=float, default=None)
-    parser.add_argument("--dt_exact_cost_realization", type=str2bool, default=None)
-    parser.add_argument("--dt_closed_form_dyadic_realization", type=str2bool, default=None)
-    parser.add_argument("--dt_minimal_quotient_realization", type=str2bool, default=None, help="Use the Minimal Laurent Quotient dyadic DT1D parameterization.")
-    parser.add_argument("--dt_quotient_support_cap", type=int, default=None, choices=[4,8], help="Maximum MLQ dyadic offset; HOSQ requires 8.")
-    parser.add_argument("--dt_hosq_realization", type=str2bool, default=None, help="Use Hierarchically Orthogonal Spectral Quotient DT1D.")
-    parser.add_argument("--dt_hosq_subgroup_size", type=int, default=None, help="Fine HOSQ subgroup size inside each coarse alpha group.")
-    parser.add_argument("--dt_hosq_rank4", type=int, default=None, help="Number of orthogonal channel contrasts at offset 4.")
-    parser.add_argument("--dt_hosq_rank8", type=int, default=None, help="Number of orthogonal channel contrasts at offset 8.")
+    parser.add_argument(
+        "--dt_variant", type=str, default=None, choices=["hosq_lite_c1", "legacy"],
+        help="DT1D family member: revised HOSQ-Lite-C1 proposal or original DT1D baseline.",
+    )
+    parser.add_argument(
+        "--dt_detail_basis", type=str, default=None, choices=["orth", "raw"],
+        help="HOSQ-Lite detail basis; raw is an ablation only.",
+    )
+    parser.add_argument(
+        "--dt_detail_components", type=str, default=None,
+        choices=["both", "offset4", "offset8", "none"],
+        help="HOSQ-Lite detail ablation. The final proposal uses both.",
+    )
+    parser.add_argument("--dt_contrast_split", type=int, default=None)
     parser.add_argument("--dt_input_adaptive_gate", type=str2bool, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_gate_reduction", type=int, default=None, help="Deprecated and ignored; retained for configuration compatibility.")
     parser.add_argument("--dt_axis", type=str, default=None, choices=["h", "w", "hw"])
@@ -321,14 +327,10 @@ def canonicalize_args(args):
         "dt_scale_adaptive": False,
         "dt_separate_axis_kernels": True,
         "dt_gate_temperature": 1.0,
-        "dt_exact_cost_realization": True,
-        "dt_closed_form_dyadic_realization": True,
-        "dt_minimal_quotient_realization": False,
-        "dt_quotient_support_cap": 8,
-        "dt_hosq_realization": False,
-        "dt_hosq_subgroup_size": 8,
-        "dt_hosq_rank4": 1,
-        "dt_hosq_rank8": 2,
+        "dt_variant": "hosq_lite_c1",
+        "dt_detail_basis": "orth",
+        "dt_detail_components": "both",
+        "dt_contrast_split": 8,
         "dt_input_adaptive_gate": False,
         "dt_gate_reduction": 4,
         "dt_axis": "hw",
@@ -337,7 +339,7 @@ def canonicalize_args(args):
         "dt_pw_ratio": 32,
         "dt_pw_groups": 4,
         "dt_gate_init": 0.01,
-        "dt_padding": "reflect",
+        "dt_padding": "replicate",
         "dt_use_bn": False,
         "dt_tie_sym": True,
     }
@@ -348,10 +350,6 @@ def canonicalize_args(args):
         "dt_scale_adaptive": "hcc_scale_adaptive",
         "dt_separate_axis_kernels": "hcc_separate_axis_kernels",
         "dt_gate_temperature": "hcc_gate_temperature",
-        "dt_exact_cost_realization": "hcc_exact_cost_realization",
-        "dt_closed_form_dyadic_realization": "hcc_closed_form_dyadic_realization",
-        "dt_minimal_quotient_realization": "hcc_minimal_quotient_realization",
-        "dt_quotient_support_cap": "hcc_quotient_support_cap",
         "dt_input_adaptive_gate": "hcc_input_adaptive_gate",
         "dt_gate_reduction": "hcc_gate_reduction",
         "dt_axis": "hcc_axis",
@@ -697,39 +695,36 @@ def _add_adapters(model_backbone: nn.Module, args):
 
     elif method == "dt":
         from models.dt1d_adapter import DT1DAdapter
+        from models.hosq_lite_c1_adapter import HOSQLiteC1Adapter
 
         def make_adapter(ch):
-            m = DT1DAdapter(
-                C=ch,
-                M=args.dt_M,
-                h=args.dt_h,
-                dilations=args.dt_dilations,
-                scale_adaptive=args.dt_scale_adaptive,
-                separate_axis_kernels=args.dt_separate_axis_kernels,
-                gate_temperature=args.dt_gate_temperature,
-                exact_cost_realization=args.dt_exact_cost_realization,
-                closed_form_dyadic_realization=args.dt_closed_form_dyadic_realization,
-                minimal_quotient_realization=args.dt_minimal_quotient_realization,
-                quotient_support_cap=args.dt_quotient_support_cap,
-                hosq_realization=args.dt_hosq_realization,
-                hosq_subgroup_size=args.dt_hosq_subgroup_size,
-                hosq_rank4=args.dt_hosq_rank4,
-                hosq_rank8=args.dt_hosq_rank8,
-                input_adaptive_gate=args.dt_input_adaptive_gate,
-                gate_reduction=args.dt_gate_reduction,
-                axis=args.dt_axis,
-                alpha_group=args.dt_alpha_group,
-                per_channel=False,
-                tie_sym=args.dt_tie_sym,
-                no_pw=bool(args.dt_no_pw),
-                pw_ratio=args.dt_pw_ratio,
-                pw_groups=args.dt_pw_groups,
-                use_bn=args.dt_use_bn,
-                residual_scale=args.adapt_scale,
-                gate_init=args.dt_gate_init,
-                padding_mode=args.dt_padding,
-            )
+            if args.dt_variant == "legacy":
+                m = DT1DAdapter(
+                    C=ch, M=args.dt_M, h=args.dt_h,
+                    dilations=args.dt_dilations,
+                    scale_adaptive=args.dt_scale_adaptive,
+                    separate_axis_kernels=args.dt_separate_axis_kernels,
+                    gate_temperature=args.dt_gate_temperature,
+                    input_adaptive_gate=args.dt_input_adaptive_gate,
+                    gate_reduction=args.dt_gate_reduction,
+                    axis=args.dt_axis, alpha_group=args.dt_alpha_group,
+                    per_channel=False, tie_sym=args.dt_tie_sym,
+                    no_pw=bool(args.dt_no_pw), pw_ratio=args.dt_pw_ratio,
+                    pw_groups=args.dt_pw_groups, use_bn=args.dt_use_bn,
+                    residual_scale=args.adapt_scale, gate_init=args.dt_gate_init,
+                    padding_mode=args.dt_padding,
+                )
+            else:
+                m = HOSQLiteC1Adapter(
+                    C=ch, axis=args.dt_axis, alpha_group=args.dt_alpha_group,
+                    residual_scale=args.adapt_scale, gate_init=args.dt_gate_init,
+                    padding_mode=args.dt_padding,
+                    contrast_split=args.dt_contrast_split,
+                    detail_basis=args.dt_detail_basis,
+                    detail_components=args.dt_detail_components,
+                )
             m.is_dt1d_adapter = True
+            m.dt_variant = args.dt_variant
             return m
 
         _attach_hook_adapters(model_backbone, args, make_adapter)

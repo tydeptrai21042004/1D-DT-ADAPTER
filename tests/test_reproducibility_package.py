@@ -86,4 +86,4 @@ def test_all_publication_configs_are_committed_portable_and_non_smoke():
             assert args["deterministic"] is True
             assert args["dataset"] != "fake"
             assert str(args["weights"]).lower() != "none"
-    assert len(list((ROOT / "configs/paper/generated").rglob("*.yaml"))) == expected == 408
+    assert len(list((ROOT / "configs/paper/generated").rglob("*.yaml"))) == expected

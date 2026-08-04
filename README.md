@@ -1,212 +1,87 @@
-# HOSQ-DT1D v0.10.0
+# HOSQ-Lite-C1-Orth DT1D-Adapter
 
-This release adds **Hierarchically Orthogonal Spectral Quotient DT1D-Adapter
-(HOSQ-DT1D)** while retaining the original reduced axial filtering and shifted
-symmetric group-shared kernel principle.
+This repository contains one revised proposal and one retained original-method baseline:
 
-The final preset uses an MLQ8 Group-32 coarse quotient, Group-8 orthogonal
-channel-detail subgroups, one zero-DC contrast at offset 4, two contrasts at
-offset 8, height/width filtering, a residual scalar gate, and no optional
-pointwise block. It uses ordinary PyTorch depthwise axial convolution—no custom
-CUDA, compilation, quantization, pruning, caching, or TensorRT.
+- **Proposal:** `HOSQ-Lite-C1-Orth`, implemented by `models.hosq_lite_c1_adapter.HOSQLiteC1Adapter`.
+- **Original baseline:** `DT1D-Adapter`, implemented by `models.dt1d_adapter.DT1DAdapter`.
 
-The existing Git branch name is intentionally unchanged:
-`dt1d-v8-cnn-three-seed`.
+Alternative proposal families from earlier development branches have been removed. The remaining `detail_basis` and `detail_components` settings are component ablations of HOSQ-Lite-C1-Orth, not separate proposals.
 
-Quick validation:
+## Final method
 
-```bash
-pytest -q
-python tools/validate_hosq_theory.py
-python tools/benchmark_hosq_latency.py --batch-size 4 --warmup 3 --iters 8
+HOSQ-Lite-C1-Orth keeps the original Group-16 shifted axial DT1D structure. It learns five observable symmetric quotient coefficients at offsets
+
+```text
+0, ±1, ±2, ±4, ±8
 ```
 
-Use `KAGGLE_HOSQ_FULL_CELL.txt` after pushing this release to the unchanged
-GitHub branch.
+and adds one zero-mean channel contrast per original group with two orthonormal zero-DC spectral coordinates. The adapter executes exactly one 17-tap depthwise convolution per enabled axis. The paper configuration uses height and width axes, `replicate` padding, no pointwise block, and a scalar residual gate.
 
-
-This repository is the **CNN-only** experimental package for DT1D-Adapter. New paper runs use the canonical implementation `models/dt1d_adapter.py`, class `DT1DAdapter`, CLI method `--tuning_method dt`, and `--dt_*` arguments. `models/hcc_adapter.py` is retained only as a compatibility shim for older checkpoints.
-
-## What changed in v0.8.0
-
-- Every stochastic CNN classification table can be run with **three independent seeds: 0, 1, and 2**.
-- **Full fine-tuning** and **Linear probing** are executable baselines and are included in every comparison target.
-- One versioned manifest maps manuscript tables and figures to datasets, CNN backbones, epochs, batch sizes, methods, and seeds.
-- **408 portable per-run YAML configurations** are committed for all selected target/method/seed combinations.
-- Every run records its resolved YAML, exact command, seed, split manifest, Git revision, environment, pretrained weights, logs, metrics, and status.
-- Aggregation exports raw runs and `mean ± standard deviation` summaries in CSV, JSON, and LaTeX formats.
-- Figure 1 and Figure 4 are regenerated from three-seed outputs. Figures 2 and 3 are deterministic and do not require training seeds.
-- ViT, Swin, Transformer, and token-prompt experiments are rejected by the CNN paper runner.
-
-## V9 mathematical latency revision
-
-The repository now includes **SCDQ-DT1D**, a Spectrally Closed Dyadic Quotient parameterization that retains reduced axial filtering and shifted symmetric group-shared kernels while removing the exact dyadic scale nullspace. See [`MLQ_SCDQ_FINAL_REPORT.md`](MLQ_SCDQ_FINAL_REPORT.md).
-
-Key commands:
-
-```bash
-pytest -q
-python tools/validate_mlq_theory.py
-python tools/benchmark_mlq_latency.py --batch-size 4 --warmup 3 --iters 10
-```
-
-The final three-seed ablation configurations are under `configs/experiments/table_14_15_mlq_ablation/`.
-
-## Supported manuscript targets
-
-| Target | Dataset / CNN backbone | Protocol |
-|---|---|---|
-| Table 2 | DTD / ResNet-18 | 9 DT1D ablations × seeds 0,1,2 |
-| Tables 3–4 | DTD or Flowers102 / ResNet-50 | 100 epochs × 3 seeds |
-| Tables 5–7 | Flowers102 / ResNet-18 | 10 or 100 epochs × 3 seeds |
-| Tables 8–9 | SVHN or Oxford-IIIT Pet / ResNet-50 | 10 epochs × 3 seeds |
-| Tables 10–13 | Food-101 or Oxford-IIIT Pet / ResNet-18 or EfficientNet-B0 | 10 or 100 epochs × 3 seeds |
-| Tables 14–15 | Caltech101 / ResNet-18 | accuracy and efficiency × 3 seeds |
-| Tables 18–19 | EuroSAT / MobileNetV3-Small | accuracy and efficiency × 3 seeds |
-| Figure 1 | Caltech101 / ResNet-18 / DT1D | mean convergence curve with ±1 std band |
-| Figure 4 | FGVC-Aircraft / ResNet-18 | mean test accuracy ±1 std versus parameter count |
-
-The experimental matrix is defined in [`configs/paper/cnn_three_seed_manifest.yaml`](configs/paper/cnn_three_seed_manifest.yaml).
-
-## Installation
+## Install and validate
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-or:
-
-```bash
-conda env create -f environment.yml
-conda activate dt1d-adapter-0.8.0
-```
-
-## Run one table
-
-```bash
-DATA_DIR=/path/to/data \
-DEVICE=cuda \
-SEEDS=0,1,2 \
-bash scripts/tables/table_14_15_three_seed.sh
-```
-
-Other table entry points are in `scripts/tables/`.
-
-## Run a target directly
-
-```bash
-python tools/run_cnn_paper.py \
-  --target table_03 \
-  --seeds 0,1,2 \
-  --data-path /path/to/data \
-  --device cuda \
-  --skip-if-complete
-
-python tools/aggregate_cnn_paper.py \
-  --root outputs/cnn_paper_three_seed \
-  --target table_03 \
-  --require-seeds 0,1,2
-```
-
-Use the table's publication method list with `--methods target`. To run every implemented CNN method instead:
-
-```bash
-python tools/run_cnn_paper.py \
-  --target table_03 \
-  --methods all-cnn \
-  --seeds 0,1,2 \
-  --data-path /path/to/data \
-  --device cuda
-```
-
-## Full fine-tuning and Linear probing
-
-Both methods use the same backbone, pretrained weights, data split, augmentation, optimizer family, epoch count, and seed as DT1D and the other baselines.
-
-```bash
-python tools/run_cnn_paper.py \
-  --target table_14_15 \
-  --methods full,linear \
-  --seeds 0,1,2 \
-  --data-path /path/to/data \
-  --device cuda
-```
-
-- `full`: every backbone and classifier parameter is trainable.
-- `linear`: only the replaced task classifier is trainable; the feature extractor and BatchNorm statistics are frozen.
-
-## Figures
-
-```bash
-bash scripts/figures/figure_01_three_seed.sh
-bash scripts/figures/figure_02_deterministic.sh
-bash scripts/figures/figure_03_deterministic.sh
-bash scripts/figures/figure_04_three_seed.sh
-```
-
-## Seed policy
-
-For a fixed seed, all methods receive the same split and data-loader order. Seeds 0, 1, and 2 independently control Python, NumPy, PyTorch, CUDA, samplers, workers, model initialization, and generated validation splits. Datasets with official train/validation/test partitions retain their official partitions. Committed Caltech101 split files are provided for all three seeds.
-
-## Output structure
-
-```text
-outputs/cnn_paper_three_seed/
-  table_14_15/
-    caltech101/resnet18/
-      dt1d/seed_0/
-      dt1d/seed_1/
-      dt1d/seed_2/
-      full/seed_0/...
-      linear/seed_0/...
-  aggregated/table_14_15/
-    raw_runs.csv
-    mean_std_numeric.csv
-    mean_std_pretty.csv
-    manuscript_compact.csv
-    manuscript_compact.tex
-    seed_completeness.json
-```
-
-Each run directory contains `args.json`, `resolved_config.json`, `command.sh`, `environment.json`, `run_metadata.json`, `run_status.json`, `stdout.log`, `history.json`, `convergence_summary.json`, `test_summary.json`, and efficiency output when profiling is enabled.
-
-## Kaggle
-
-Push branch `dt1d-v8-cnn-three-seed`, enable Internet and a GPU, then use [`KAGGLE_SCDQ_FULL_CELL.txt`](KAGGLE_SCDQ_FULL_CELL.txt). Select a target at the top of the cell:
-
-```bash
-BRANCH="dt1d-v8-cnn-three-seed"
-TARGET="table_14_15"
-SEEDS="0,1,2"
-```
-
-## Validation
-
-```bash
-python tools/verify_reproducibility_package.py
-python tools/preflight_cnn_matrix.py --target all
-python -m compileall -q main.py engine.py datasets models tools tests
 pytest -q
+python tools/validate_hosq_lite_c1.py
+python tools/benchmark_hosq_lite_latency.py --batch-size 2 --warmup 3 --iters 15
 ```
 
-A no-download CPU smoke run is also available:
+## Run the focused ablation
+
+```bash
+SEEDS=0,1,2 DATA_DIR=/path/to/data DEVICE=cuda \
+  bash RUN_HOSQ_LITE_C1_ABLATION.sh
+```
+
+The focused manifest is `configs/experiments/hosq_lite_c1_ablation.yaml`. It evaluates:
+
+1. final HOSQ-Lite-C1-Orth;
+2. original DT1D with pointwise mixing;
+3. original DT1D core;
+4. removal of the orthogonal detail;
+5. offset-4 detail only;
+6. offset-8 detail only;
+7. raw zero-DC atoms instead of the orthogonal basis;
+8. height-only and width-only filtering;
+9. Group-8 and Group-32 sharing.
+
+## Run the full CNN paper matrix
 
 ```bash
 python tools/run_cnn_paper.py \
-  --target table_14_15 \
-  --methods dt1d,full,linear \
-  --seeds 0 \
-  --smoke \
-  --output-root /tmp/dt1d-smoke
+  --target all --seeds 0,1,2 \
+  --data-path /path/to/data --device cuda --skip-if-complete
 ```
 
-## Release
+The paper manifest is `configs/paper/cnn_three_seed_manifest.yaml`. Main comparison tables use HOSQ-Lite-C1-Orth as `dt1d`; original DT1D appears only in the focused ablation.
 
-Prepared branch: `dt1d-v8-cnn-three-seed`  
-Prepared tag: `v0.8.0`
+## Direct CLI
 
-See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md), [`MANUSCRIPT_TO_CODE.md`](MANUSCRIPT_TO_CODE.md), [`MANUSCRIPT_ALIGNMENT_NOTES.md`](MANUSCRIPT_ALIGNMENT_NOTES.md), and [`PRETRAINED_WEIGHTS.md`](PRETRAINED_WEIGHTS.md).
+Final proposal:
 
-## License
+```bash
+python main.py \
+  --tuning_method dt --dt_variant hosq_lite_c1 \
+  --dt_alpha_group 16 --dt_axis hw --dt_padding replicate \
+  --dt_detail_basis orth --dt_detail_components both \
+  --dt_contrast_split 8
+```
 
-Apache License 2.0. See [`LICENSE`](LICENSE).
+Original submitted DT1D baseline:
+
+```bash
+python main.py \
+  --tuning_method dt --dt_variant legacy \
+  --dt_M 1 --dt_dilations 1,2,4 --dt_scale_adaptive true \
+  --dt_alpha_group 16 --dt_axis hw --dt_padding replicate
+```
+
+## Reproducibility policy
+
+The main experiments use independent seeds 0, 1, and 2; the same dataset split, pretrained weights, optimizer family, schedule, checkpoint rule, device class, precision, and profiling settings must be used across methods. Test accuracy is reported at the best validation checkpoint. Generated publication YAML files are stored under `configs/paper/generated/`.
+
+## Important boundary rule
+
+Use `replicate` padding for both HOSQ-Lite-C1-Orth and original DT1D in direct equivalence and latency comparisons. A fused radius-8 kernel and separate dilated branches do not share the same finite-boundary behavior under `reflect` padding on the final `7×7` ResNet stage.
+
+See `HOSQ_LITE_C1_FINAL_REPORT.md`, `MANUSCRIPT_TO_CODE.md`, and `REPRODUCIBILITY.md` for details.
